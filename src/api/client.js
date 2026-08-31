@@ -919,6 +919,31 @@ export const setFactoryInventory = async (productId, variants) => {
     if (/set_factory_inventory|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库待出货功能尚未部署，请先执行 factory-inventory-migration.sql');
     throw new Error(error.message || '保存待出货库存失败');
   }
+  if (data?.change) await localDb.upsertProductChange(data.change);
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
+  return { data: normalizeFactoryItem({ ...data.factory, product: data.product }) };
+};
+
+export const addFactoryInventory = async (productId, variants) => {
+  assertCanWrite();
+  const clean = (variants || []).map(variant => ({
+    id: variant.id,
+    quantity: Math.max(0, Number.parseInt(variant.quantity, 10) || 0),
+  }));
+  if (!clean.some(variant => variant.quantity > 0)) throw new Error('请至少填写一个尺码的本次新增数量');
+  if (!USE_CLOUD) return api.put(`/factory-inventory/${productId}`, { variants: clean, mode: 'add' });
+  if (navigator.onLine === false) throw new Error('待出货库存录入需要连接云端，请联网后重试');
+  const { data, error } = await supabase.rpc('add_factory_inventory', {
+    p_product_id: Number(productId),
+    p_variant_ids: clean.map(variant => variant.id),
+    p_quantities: clean.map(variant => variant.quantity),
+  });
+  if (error) {
+    if (/add_factory_inventory|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库增量录入接口尚未部署，请重新执行 factory-inventory-migration.sql');
+    throw new Error(error.message || '新增待出货库存失败');
+  }
+  if (data?.change) await localDb.upsertProductChange(data.change);
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
   return { data: normalizeFactoryItem({ ...data.factory, product: data.product }) };
 };
 
@@ -942,6 +967,7 @@ export const transferFactoryInventory = async (productId, variants, operator = '
   }
   if (data?.product) await localDb.upsertProduct(normalizeProduct(data.product));
   for (const movement of data?.movements || []) await localDb.upsertMovement(movement);
+  if (data?.change) await localDb.upsertProductChange(data.change);
   if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
   requestBackgroundSync();
   return { data: {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowDownToLine, Boxes, CheckCircle2, Factory, LoaderCircle, Package, Pencil, Plus, Search, X } from 'lucide-react';
-import { getFactoryInventory, getProducts, setFactoryInventory, transferFactoryInventory } from '../api/client';
+import { ArrowDownToLine, Boxes, Calculator, CheckCircle2, Factory, LoaderCircle, Package, Pencil, Plus, Search, X } from 'lucide-react';
+import { addFactoryInventory, getFactoryInventory, getProducts, setFactoryInventory, transferFactoryInventory } from '../api/client';
 import { useAuth } from '../AuthContext';
 import ProductTagBadges from '../components/ProductTagBadges';
 import useSyncRefresh from '../lib/useSyncRefresh';
@@ -14,6 +14,7 @@ export default function FactoryInventory() {
   const [search, setSearch] = useState('');
   const [editorItem, setEditorItem] = useState(null);
   const [showEditor, setShowEditor] = useState(false);
+  const [showCalculator, setShowCalculator] = useState(false);
   const [transferItem, setTransferItem] = useState(null);
   const [message, setMessage] = useState(null);
 
@@ -49,7 +50,10 @@ export default function FactoryInventory() {
     <div className="space-y-5">
       <div className="flex items-start justify-between gap-3">
         <div><h1 className="text-xl font-bold text-gray-900">工厂待出货</h1><p className="mt-0.5 text-sm text-gray-500">管理尚未进入销售仓库的商品</p></div>
-        {canManage && <button type="button" onClick={() => openEditor(null)} className="btn-primary shrink-0"><Plus className="h-4 w-4" />录入待出货</button>}
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+          <button type="button" onClick={() => setShowCalculator(true)} className="btn-secondary"><Calculator className="h-4 w-4" />补货计算</button>
+          {canManage && <button type="button" onClick={() => openEditor(null)} className="btn-primary"><Plus className="h-4 w-4" />录入待出货</button>}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -66,9 +70,94 @@ export default function FactoryInventory() {
         : <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">{filteredItems.map(item => <FactoryCard key={item.id} item={item} canManage={canManage} onEdit={() => openEditor(item)} onTransfer={() => setTransferItem(item)} />)}</div>}
 
       {showEditor && <FactoryInventoryEditor products={products} items={items} initialItem={editorItem} onClose={() => { setShowEditor(false); setEditorItem(null); }} onSaved={handleSaved} />}
+      {showCalculator && <ReplenishmentCalculator products={products} items={items} onClose={() => setShowCalculator(false)} />}
       {transferItem && <FactoryTransferModal item={transferItem} operator={user?.display_name || ''} onClose={() => setTransferItem(null)} onTransferred={handleTransferred} />}
     </div>
   );
+}
+
+function ReplenishmentCalculator({ products, items, onClose }) {
+  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [search, setSearch] = useState('');
+  const [orders, setOrders] = useState({});
+
+  const candidates = useMemo(() => {
+    const keyword = search.trim().toLocaleLowerCase('zh-CN');
+    if (!keyword) return products;
+    return products.filter(product => [
+      product.name, product.category, product.sub_tags,
+      ...(product.variants || []).flatMap(variant => [variant.size, variant.barcode]),
+    ].some(value => String(value || '').toLocaleLowerCase('zh-CN').includes(keyword)));
+  }, [products, search]);
+
+  const chooseProduct = product => {
+    setSelectedProduct(product);
+    setOrders(Object.fromEntries((product.variants || []).map(variant => [variant.id, ''])));
+  };
+
+  const factoryItem = useMemo(() => selectedProduct
+    ? items.find(item => String(item.product_id) === String(selectedProduct.id))
+    : null, [items, selectedProduct]);
+
+  const rows = useMemo(() => {
+    if (!selectedProduct) return [];
+    return (selectedProduct.variants || []).map(variant => {
+      const orderQuantity = Math.max(0, Number.parseInt(orders[variant.id], 10) || 0);
+      const salesStock = Math.max(0, Number(variant.current_stock) || 0);
+      const factoryStock = Math.max(0, Number(factoryItem?.variants?.find(item => String(item.id) === String(variant.id))?.quantity) || 0);
+      const difference = orderQuantity - salesStock - factoryStock;
+      return { ...variant, orderQuantity, salesStock, factoryStock, difference, suggested: Math.max(0, difference) };
+    });
+  }, [factoryItem, orders, selectedProduct]);
+
+  const totals = useMemo(() => rows.reduce((result, row) => ({
+    order: result.order + row.orderQuantity,
+    sales: result.sales + row.salesStock,
+    factory: result.factory + row.factoryStock,
+    suggested: result.suggested + row.suggested,
+  }), { order: 0, sales: 0, factory: 0, suggested: 0 }), [rows]);
+
+  return <div className="fixed inset-0 z-[85] flex flex-col bg-gray-50">
+    <header className="flex shrink-0 items-center gap-3 border-b border-gray-100 bg-white px-4 py-3" style={{ paddingTop: 'max(12px, env(safe-area-inset-top))' }}>
+      <button type="button" onClick={onClose} className="rounded-lg p-1.5 hover:bg-gray-100"><X className="h-5 w-5 text-gray-500" /></button>
+      <div className="min-w-0 flex-1"><h2 className="font-bold text-gray-900">补货计算</h2><p className="truncate text-xs text-gray-400">差数 = 订单数量 - 销售库存 - 工厂待出货库存</p></div>
+    </header>
+    <main className="flex-1 overflow-y-auto p-4">
+      <div className="mx-auto max-w-3xl space-y-4 pb-6">
+        {!selectedProduct ? <>
+          <div className="relative"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" /><input className="input pl-9" placeholder="搜索并选择需要计算的商品" value={search} onChange={event => setSearch(event.target.value)} autoFocus /></div>
+          <div className="card divide-y divide-gray-100">
+            {candidates.length ? candidates.map(product => <button key={product.id} type="button" onClick={() => chooseProduct(product)} className="flex w-full items-center gap-3 p-3 text-left hover:bg-gray-50">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-gray-100">{product.image_path ? <img src={product.image_path} alt="" className="h-full w-full object-cover" /> : <Package className="h-5 w-5 text-gray-300" />}</span>
+              <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-gray-800">{product.name}</span><span className="text-xs text-gray-400">{product.variants?.length || 0} 个尺码 · 销售库存 {product.current_stock || 0}</span></span>
+            </button>) : <div className="p-10 text-center text-sm text-gray-400">未找到匹配商品</div>}
+          </div>
+        </> : <>
+          <div className="card flex items-center gap-3 p-4">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-gray-100">{selectedProduct.image_path ? <img src={selectedProduct.image_path} alt="" className="h-full w-full object-cover" /> : <Package className="h-5 w-5 text-gray-300" />}</span>
+            <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-gray-900">{selectedProduct.name}</p><ProductTagBadges product={selectedProduct} max={3} className="mt-1" /></div>
+            <button type="button" onClick={() => { setSelectedProduct(null); setSearch(''); }} className="text-xs font-medium text-primary-600">更换商品</button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="card p-3"><p className="text-xs text-gray-400">订单总量</p><p className="mt-1 text-xl font-bold text-gray-900">{totals.order}</p></div>
+            <div className="card p-3"><p className="text-xs text-gray-400">销售库存</p><p className="mt-1 text-xl font-bold text-blue-600">{totals.sales}</p></div>
+            <div className="card p-3"><p className="text-xs text-gray-400">待出货库存</p><p className="mt-1 text-xl font-bold text-amber-600">{totals.factory}</p></div>
+            <div className="card p-3"><p className="text-xs text-gray-400">建议补货</p><p className="mt-1 text-xl font-bold text-red-600">{totals.suggested}</p></div>
+          </div>
+
+          <section className="card overflow-hidden">
+            <div className="border-b border-gray-100 px-4 py-3"><h3 className="text-sm font-medium text-gray-800">按尺码输入当前订单数量</h3><p className="mt-0.5 text-xs text-gray-400">差数大于 0 时为建议补货量，小于等于 0 时无需补货</p></div>
+            <div className="divide-y divide-gray-100">{rows.map(row => <div key={row.id} className="p-4">
+              <div className="flex items-center gap-3"><div className="min-w-0 flex-1"><p className="text-sm font-semibold text-gray-800">{row.size || '未命名尺码'}</p><p className="truncate font-mono text-xs text-gray-400">{row.barcode || '无条形码'}</p></div><label className="flex items-center gap-2 text-xs text-gray-500"><span>订单</span><input type="number" min="0" step="1" placeholder="0" value={orders[row.id] ?? ''} onChange={event => setOrders(current => ({ ...current, [row.id]: event.target.value }))} className="input h-10 w-24 text-center font-semibold" aria-label={`${row.size}订单数量`} /></label></div>
+              <div className="mt-3 grid grid-cols-4 gap-2 text-center"><div className="rounded-lg bg-blue-50 px-2 py-2"><p className="text-[10px] text-blue-500">销售库存</p><p className="text-sm font-semibold text-blue-700">{row.salesStock}</p></div><div className="rounded-lg bg-amber-50 px-2 py-2"><p className="text-[10px] text-amber-500">待出货</p><p className="text-sm font-semibold text-amber-700">{row.factoryStock}</p></div><div className={`rounded-lg px-2 py-2 ${row.difference > 0 ? 'bg-red-50' : 'bg-green-50'}`}><p className={`text-[10px] ${row.difference > 0 ? 'text-red-500' : 'text-green-500'}`}>差数</p><p className={`text-sm font-semibold ${row.difference > 0 ? 'text-red-700' : 'text-green-700'}`}>{row.difference}</p></div><div className={`rounded-lg px-2 py-2 ${row.suggested > 0 ? 'bg-red-50' : 'bg-gray-50'}`}><p className={`text-[10px] ${row.suggested > 0 ? 'text-red-500' : 'text-gray-400'}`}>建议补货</p><p className={`text-sm font-semibold ${row.suggested > 0 ? 'text-red-700' : 'text-gray-500'}`}>{row.suggested}</p></div></div>
+            </div>)}</div>
+          </section>
+        </>}
+      </div>
+    </main>
+    <footer className="shrink-0 border-t border-gray-200 bg-white px-4 py-3" style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}><div className="mx-auto flex max-w-3xl justify-end"><button type="button" onClick={onClose} className="btn-primary min-w-28">完成</button></div></footer>
+  </div>;
 }
 
 function FactoryCard({ item, canManage, onEdit, onTransfer }) {
@@ -94,8 +183,7 @@ function FactoryInventoryEditor({ products, items, initialItem, onClose, onSaved
 
   const chooseProduct = product => {
     setSelectedProduct(product);
-    const existing = items.find(item => String(item.product_id) === String(product.id));
-    setQuantities(Object.fromEntries((product.variants || []).map(variant => [variant.id, existing?.variants?.find(item => item.id === variant.id)?.quantity || 0])));
+    setQuantities(Object.fromEntries((product.variants || []).map(variant => [variant.id, 0])));
     setError('');
   };
   const submit = async event => {
@@ -104,19 +192,22 @@ function FactoryInventoryEditor({ products, items, initialItem, onClose, onSaved
     setSaving(true); setError('');
     try {
       const variants = (selectedProduct.variants || []).map(variant => ({ id: variant.id, quantity: Math.max(0, Number.parseInt(quantities[variant.id], 10) || 0) }));
-      await setFactoryInventory(selectedProduct.id, variants);
-      await onSaved(`已保存「${selectedProduct.name}」的待出货数量`);
+      if (initialItem) await setFactoryInventory(selectedProduct.id, variants);
+      else await addFactoryInventory(selectedProduct.id, variants);
+      await onSaved(initialItem
+        ? `已调整「${selectedProduct.name}」的待出货数量`
+        : `本次录入已合并到「${selectedProduct.name}」的待出货库存`);
     } catch (submitError) { setError(submitError.response?.data?.error || submitError.message || '保存失败'); }
     finally { setSaving(false); }
   };
 
   return <div className="fixed inset-0 z-[80] flex flex-col bg-gray-50">
-    <header className="flex shrink-0 items-center gap-3 border-b border-gray-100 bg-white px-4 py-3" style={{ paddingTop: 'max(12px, env(safe-area-inset-top))' }}><button type="button" onClick={onClose} className="rounded-lg p-1.5 hover:bg-gray-100"><X className="h-5 w-5 text-gray-500" /></button><div><h2 className="font-bold text-gray-900">{initialItem ? '修改待出货数量' : '录入待出货商品'}</h2><p className="text-xs text-gray-400">手动填写各尺码的工厂待出货数量</p></div></header>
+    <header className="flex shrink-0 items-center gap-3 border-b border-gray-100 bg-white px-4 py-3" style={{ paddingTop: 'max(12px, env(safe-area-inset-top))' }}><button type="button" onClick={onClose} className="rounded-lg p-1.5 hover:bg-gray-100"><X className="h-5 w-5 text-gray-500" /></button><div><h2 className="font-bold text-gray-900">{initialItem ? '修改待出货数量' : '录入待出货商品'}</h2><p className="text-xs text-gray-400">{initialItem ? '直接调整当前汇总数量' : '填写本次新增数量，保存后自动与已有库存合并'}</p></div></header>
     <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col"><main className="flex-1 overflow-y-auto p-4"><div className="mx-auto max-w-2xl space-y-4 pb-6">
       {error && <div className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-600">{error}</div>}
       {!selectedProduct ? <><div className="relative"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" /><input className="input pl-9" placeholder="搜索要录入的销售商品" value={search} onChange={event => setSearch(event.target.value)} autoFocus /></div><div className="card divide-y divide-gray-100">{candidates.map(product => <button key={product.id} type="button" onClick={() => chooseProduct(product)} className="flex w-full items-center gap-3 p-3 text-left hover:bg-gray-50"><span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-gray-100">{product.image_path ? <img src={product.image_path} alt="" className="h-full w-full object-cover" /> : <Package className="h-5 w-5 text-gray-300" />}</span><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-gray-800">{product.name}</span><span className="text-xs text-gray-400">{product.variants?.length || 0} 个尺码 · 销售中 done</span></span></button>)}</div></>
-      : <><div className="card flex items-center gap-3 p-4"><span className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-gray-100">{selectedProduct.image_path ? <img src={selectedProduct.image_path} alt="" className="h-full w-full object-cover" /> : <Package className="h-5 w-5 text-gray-300" />}</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-gray-900">{selectedProduct.name}</p><ProductTagBadges product={selectedProduct} max={3} className="mt-1" /></div>{!initialItem && <button type="button" onClick={() => setSelectedProduct(null)} className="text-xs text-primary-600">更换</button>}</div><section className="card overflow-hidden"><div className="border-b border-gray-100 px-4 py-3"><h3 className="text-sm font-medium text-gray-800">各尺码待出货数量</h3><p className="mt-0.5 text-xs text-gray-400">填写0表示该尺码当前没有待出货库存</p></div><div className="divide-y divide-gray-100">{(selectedProduct.variants || []).map(variant => <div key={variant.id} className="flex items-center gap-3 px-4 py-3"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{variant.size}</p><p className="truncate font-mono text-xs text-gray-400">{variant.barcode}</p></div><input type="number" min="0" step="1" value={quantities[variant.id] ?? 0} onChange={event => setQuantities(current => ({ ...current, [variant.id]: event.target.value }))} className="input h-10 w-28 text-center font-semibold" aria-label={`${variant.size}待出货数量`} /></div>)}</div></section></>}
-    </div></main><footer className="shrink-0 border-t border-gray-200 bg-white px-4 py-3" style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}><div className="mx-auto flex max-w-2xl gap-3"><button type="button" onClick={onClose} className="btn-secondary flex-1">取消</button><button type="submit" disabled={!selectedProduct || saving} className="btn-primary flex-1">{saving ? <><LoaderCircle className="h-4 w-4 animate-spin" />保存中</> : '保存待出货数量'}</button></div></footer></form>
+      : <><div className="card flex items-center gap-3 p-4"><span className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-gray-100">{selectedProduct.image_path ? <img src={selectedProduct.image_path} alt="" className="h-full w-full object-cover" /> : <Package className="h-5 w-5 text-gray-300" />}</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-gray-900">{selectedProduct.name}</p><ProductTagBadges product={selectedProduct} max={3} className="mt-1" /></div>{!initialItem && <button type="button" onClick={() => setSelectedProduct(null)} className="text-xs text-primary-600">更换</button>}</div><section className="card overflow-hidden"><div className="border-b border-gray-100 px-4 py-3"><h3 className="text-sm font-medium text-gray-800">{initialItem ? '各尺码当前汇总数量' : '各尺码本次新增数量'}</h3><p className="mt-0.5 text-xs text-gray-400">{initialItem ? '修改后将直接保存为新的汇总数量' : '可重复录入同一商品，系统会按尺码累加'}</p></div><div className="divide-y divide-gray-100">{(selectedProduct.variants || []).map(variant => <div key={variant.id} className="flex items-center gap-3 px-4 py-3"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{variant.size}</p><p className="truncate font-mono text-xs text-gray-400">{variant.barcode}</p></div><input type="number" min="0" step="1" value={quantities[variant.id] ?? 0} onChange={event => setQuantities(current => ({ ...current, [variant.id]: event.target.value }))} className="input h-10 w-28 text-center font-semibold" aria-label={`${variant.size}${initialItem ? '汇总' : '新增'}待出货数量`} /></div>)}</div></section></>}
+    </div></main><footer className="shrink-0 border-t border-gray-200 bg-white px-4 py-3" style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}><div className="mx-auto flex max-w-2xl gap-3"><button type="button" onClick={onClose} className="btn-secondary flex-1">取消</button><button type="submit" disabled={!selectedProduct || saving} className="btn-primary flex-1">{saving ? <><LoaderCircle className="h-4 w-4 animate-spin" />保存中</> : initialItem ? '保存调整' : '合并本次录入'}</button></div></footer></form>
   </div>;
 }
 

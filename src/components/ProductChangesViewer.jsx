@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, History, User, Plus, Pencil, Trash2 } from 'lucide-react';
+import { ArrowDownToLine, ArrowLeft, Factory, History, User, Plus, Pencil, Trash2 } from 'lucide-react';
 import { getProductChanges } from '../api/client';
 import useSyncRefresh from '../lib/useSyncRefresh';
 
@@ -7,6 +7,19 @@ const actionMeta = {
   create: { label: '创建商品', color: 'text-green-600', bg: 'bg-green-50', Icon: Plus },
   update: { label: '编辑商品', color: 'text-purple-600', bg: 'bg-purple-50', Icon: Pencil },
   delete: { label: '删除商品', color: 'text-red-600', bg: 'bg-red-50', Icon: Trash2 },
+};
+
+const getChangeMeta = change => {
+  if (change.field === '待出货转销售库存') {
+    return { label: '待出货入库销售', color: 'text-green-600', bg: 'bg-green-50', Icon: ArrowDownToLine };
+  }
+  if (change.field === '待出货库存录入') {
+    return { label: '录入待出货库存', color: 'text-amber-600', bg: 'bg-amber-50', Icon: Factory };
+  }
+  if (change.field === '待出货库存调整') {
+    return { label: '调整待出货库存', color: 'text-blue-600', bg: 'bg-blue-50', Icon: Factory };
+  }
+  return actionMeta[change.action] || actionMeta.update;
 };
 
 export default function ProductChangesViewer({ product, onClose }) {
@@ -67,8 +80,9 @@ export default function ProductChangesViewer({ product, onClose }) {
             <div className="card overflow-hidden">
               <div className="divide-y divide-gray-50">
                 {changes.map(c => {
-                  const meta = actionMeta[c.action] || actionMeta.update;
+                  const meta = getChangeMeta(c);
                   const Icon = meta.Icon;
+                  const effectiveAction = c.action || 'update';
                   return (
                     <div key={c.id} className="flex items-start gap-3 p-3.5">
                       <div className={`w-10 h-10 rounded-lg flex-shrink-0 flex items-center justify-center ${meta.bg}`}>
@@ -90,7 +104,7 @@ export default function ProductChangesViewer({ product, onClose }) {
                             </span>
                           )}
                         </div>
-                        {c.action === 'update' ? (
+                        {effectiveAction === 'update' ? (
                           c.field === '图片' ? (
                             <p className="text-xs text-gray-500 mt-1">
                               <span className="font-medium">{c.field}</span>

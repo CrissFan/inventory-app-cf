@@ -383,6 +383,13 @@ const factoryInventorySelect = `
   FROM factory_inventory f JOIN products p ON p.id = f.product_id
 `;
 
+const summarizeFactoryVariants = variants => {
+  const summary = (variants || [])
+    .filter(variant => (Number(variant.quantity) || 0) > 0)
+    .map(variant => `${variant.size || '未命名尺码'} ${Number(variant.quantity) || 0}`);
+  return summary.length ? summary.join('、') : '无库存';
+};
+
 router.get('/factory-inventory', authMiddleware, (req, res) => {
   const rows = db.prepare(`${factoryInventorySelect} WHERE f.team_id = ? ORDER BY f.updated_at DESC`).all(req.user.team_id);
   res.json(rows.map(factoryRow));
@@ -405,16 +412,31 @@ router.put('/factory-inventory/:productId', authMiddleware, (req, res) => {
     if (!normalized.variants.some(variant => String(variant.id) === id)) return res.status(400).json({ error: '待出货数据包含无效尺码' });
     quantityMap.set(id, quantity);
   }
+  const accumulate = req.body?.mode === 'add';
+  if (accumulate && ![...quantityMap.values()].some(quantity => quantity > 0)) return res.status(400).json({ error: '请至少填写一个尺码的本次新增数量' });
+  const existingFactory = db.prepare('SELECT * FROM factory_inventory WHERE product_id = ? AND team_id = ?').get(productId, req.user.team_id);
+  let existingVariants = [];
+  try { existingVariants = JSON.parse(existingFactory?.variants || '[]'); } catch {}
   const variants = normalized.variants.map(variant => ({
-    id: variant.id, size: variant.size || '', barcode: variant.barcode || '', quantity: quantityMap.get(String(variant.id)) || 0,
+    id: variant.id, size: variant.size || '', barcode: variant.barcode || '',
+    quantity: (accumulate ? (Number(existingVariants.find(item => String(item.id) === String(variant.id))?.quantity) || 0) : 0)
+      + (quantityMap.get(String(variant.id)) || 0),
   }));
   try {
-    db.prepare(`
-      INSERT INTO factory_inventory(team_id, product_id, status, variants) VALUES (?, ?, 'doing', ?)
-      ON CONFLICT(team_id, product_id) DO UPDATE SET variants = excluded.variants, updated_at = datetime('now', 'localtime')
-    `).run(req.user.team_id, productId, JSON.stringify(variants));
-    const row = db.prepare(`${factoryInventorySelect} WHERE f.team_id = ? AND f.product_id = ?`).get(req.user.team_id, productId);
-    res.json(factoryRow(row));
+    const save = db.transaction(() => {
+      db.prepare(`
+        INSERT INTO factory_inventory(team_id, product_id, status, variants) VALUES (?, ?, 'doing', ?)
+        ON CONFLICT(team_id, product_id) DO UPDATE SET variants = excluded.variants, updated_at = datetime('now', 'localtime')
+      `).run(req.user.team_id, productId, JSON.stringify(variants));
+      db.prepare('INSERT INTO product_changes (product_id, team_id, user_id, field, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(
+          productId, req.user.team_id, req.user.id,
+          accumulate ? '待出货库存录入' : '待出货库存调整',
+          summarizeFactoryVariants(existingVariants), summarizeFactoryVariants(variants),
+        );
+      return factoryRow(db.prepare(`${factoryInventorySelect} WHERE f.team_id = ? AND f.product_id = ?`).get(req.user.team_id, productId));
+    });
+    res.json(save());
   } catch (error) {
     res.status(400).json({ error: error.message || '保存待出货库存失败' });
   }
@@ -458,10 +480,20 @@ router.post('/factory-inventory/:productId/transfer', authMiddleware, (req, res)
       const movements = [];
       for (const [variantId, quantity] of quantityMap) {
         const variant = normalized.variants.find(item => String(item.id) === variantId);
-        const info = db.prepare("INSERT INTO stock_movements(product_id, team_id, user_id, type, quantity, reason, operator, variant_id, variant_size, variant_barcode) VALUES (?, ?, ?, 'in', ?, '工厂待出货入库', ?, ?, ?, ?)")
+        const info = db.prepare("INSERT INTO stock_movements(product_id, team_id, user_id, type, quantity, reason, operator, variant_id, variant_size, variant_barcode) VALUES (?, ?, ?, 'in', ?, '大货入库', ?, ?, ?, ?)")
           .run(productId, req.user.team_id, req.user.id, quantity, req.body.operator || req.user.display_name, variant.id, variant.size, variant.barcode);
         movements.push(db.prepare('SELECT * FROM stock_movements WHERE id = ?').get(info.lastInsertRowid));
       }
+      const transferredSummary = [...quantityMap].map(([variantId, quantity]) => {
+        const variant = normalized.variants.find(item => String(item.id) === variantId);
+        return `${variant?.size || variantId} +${quantity}`;
+      }).join('、');
+      db.prepare('INSERT INTO product_changes (product_id, team_id, user_id, field, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(
+          productId, req.user.team_id, req.user.id, '待出货转销售库存',
+          `待出货：${summarizeFactoryVariants(pending)}`,
+          `待出货：${summarizeFactoryVariants(nextPending)}；大货入库：${transferredSummary}`,
+        );
       const updatedProduct = productRow(db.prepare('SELECT * FROM products WHERE id = ?').get(productId));
       const updatedFactory = factoryRow(db.prepare(`${factoryInventorySelect} WHERE f.team_id = ? AND f.product_id = ?`).get(req.user.team_id, productId));
       return { product: updatedProduct, factory: updatedFactory, movements };
