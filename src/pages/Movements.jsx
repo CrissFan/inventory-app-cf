@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
-import { ArrowDownToLine, ArrowUpFromLine, History, Filter, Search, X } from 'lucide-react';
-import { getMovements } from '../api/client';
+import { ArrowDownToLine, ArrowUpFromLine, Factory, History, Filter, Search, X } from 'lucide-react';
+import { getActivityRecords } from '../api/client';
 import useSyncRefresh from '../lib/useSyncRefresh';
 
 export default function Movements() {
@@ -8,7 +8,7 @@ export default function Movements() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
-  const [filter, setFilter] = useState(''); // '', 'in', 'out'
+  const [filter, setFilter] = useState(''); // '', 'in', 'out', 'factory'
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const pageSize = 50;
@@ -19,7 +19,7 @@ export default function Movements() {
       const params = { page, pageSize };
       if (filter) params.type = filter;
       if (debouncedSearch) params.search = debouncedSearch;
-      const res = await getMovements(params);
+      const res = await getActivityRecords(params);
       setMovements(Array.isArray(res?.data?.data) ? res.data.data : []);
       setTotal(res?.data?.total ?? 0);
     } catch (err) {
@@ -58,12 +58,13 @@ export default function Movements() {
     { value: '', label: '全部' },
     { value: 'in', label: '入库' },
     { value: 'out', label: '出库' },
+    { value: 'factory', label: '工厂库存变更' },
   ];
 
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-xl font-bold text-gray-900">出入库记录</h1>
+        <h1 className="text-xl font-bold text-gray-900">变更记录</h1>
         <p className="text-sm text-gray-500 mt-0.5">共 {total} 条记录</p>
       </div>
 
@@ -71,7 +72,7 @@ export default function Movements() {
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
         <input
           className="input pl-9 pr-10"
-          placeholder="搜索商品名称、尺码或尺码条形码"
+          placeholder="搜索商品名称、尺码或条形码"
           value={search}
           onChange={event => setSearch(event.target.value)}
         />
@@ -79,13 +80,13 @@ export default function Movements() {
       </div>
 
       {/* Filter Tabs */}
-      <div className="flex items-center gap-2">
-        <Filter className="w-4 h-4 text-gray-400" />
+      <div className="flex items-center gap-2 overflow-x-auto pb-1">
+        <Filter className="h-4 w-4 shrink-0 text-gray-400" />
         {filters.map(f => (
           <button
             key={f.value}
             onClick={() => { setPage(1); setFilter(f.value); }}
-            className={`px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+            className={`shrink-0 px-3.5 py-1.5 rounded-lg text-sm font-medium transition-colors ${
               filter === f.value
                 ? 'bg-primary-600 text-white'
                 : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
@@ -104,16 +105,33 @@ export default function Movements() {
       ) : movements.length === 0 ? (
         <div className="card p-12 text-center text-gray-400 text-sm">
           <History className="w-10 h-10 mx-auto mb-2 text-gray-300" />
-          {debouncedSearch ? '未找到该商品的出入库记录' : '暂无出入库记录'}
+          {debouncedSearch ? '未找到相关变更记录' : filter === 'factory' ? '暂无工厂库存变更记录' : '暂无变更记录'}
         </div>
       ) : (
         <>
           <div className="card overflow-hidden">
             <div className="divide-y divide-gray-50">
               {movements.map(m => {
+                if (m.record_kind === 'factory') {
+                  const factoryLabel = m.field === '待出货库存录入'
+                    ? '录入待出货库存'
+                    : m.field === '待出货库存调整'
+                      ? '调整待出货库存'
+                      : '待出货入库销售';
+                  return (
+                    <div key={`factory_${m.id}`} className="flex items-start gap-3 p-3.5 hover:bg-gray-50">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-amber-50"><Factory className="h-5 w-5 text-amber-600" /></div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2"><p className="truncate text-sm font-medium text-gray-900">{m.product_name || '已删除商品'}</p><span className="badge shrink-0 bg-amber-50 text-amber-700">{factoryLabel}</span>{m.product_image && <img src={m.product_image} alt="" className="h-4 w-4 shrink-0 rounded object-cover" />}</div>
+                        <div className="mt-0.5 flex items-center gap-2"><span className="text-xs text-gray-400">{formatDate(m.created_at)}</span>{m.user_name && <span className="text-xs text-gray-400">· {m.user_name}</span>}</div>
+                        <p className="mt-1 text-xs leading-relaxed text-gray-500"><span className="text-gray-400">{m.old_value || '无库存'}</span><span className="mx-1 text-gray-300">→</span><span>{m.new_value || '无库存'}</span></p>
+                      </div>
+                    </div>
+                  );
+                }
                 const isIn = m.type === 'in';
                 return (
-                  <div key={m.id} className="flex items-center gap-3 p-3.5 hover:bg-gray-50">
+                  <div key={`movement_${m.id}`} className="flex items-center gap-3 p-3.5 hover:bg-gray-50">
                     <div className={`w-10 h-10 rounded-lg flex-shrink-0 flex items-center justify-center ${
                       isIn ? 'bg-green-50' : 'bg-blue-50'
                     }`}>

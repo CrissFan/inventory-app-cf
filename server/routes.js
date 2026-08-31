@@ -746,4 +746,44 @@ router.get('/changes', authMiddleware, (req, res) => {
   res.json({ data: rows, total, page: parseInt(page), pageSize: limit });
 });
 
+// Unified activity feed: stock movements plus factory pending-inventory changes.
+router.get('/activity', authMiddleware, (req, res) => {
+  const requestedPage = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize, 10) || 50));
+  const type = String(req.query.type || '');
+  const search = String(req.query.search || '').trim().toLocaleLowerCase('zh-CN');
+
+  const movementRecords = db.prepare(`
+    SELECT m.*, 'movement' AS record_kind, p.name AS product_name, p.unit AS product_unit,
+      p.image_path AS product_image, u.display_name AS operator_name
+    FROM stock_movements m
+    LEFT JOIN products p ON m.product_id = p.id
+    LEFT JOIN users u ON m.user_id = u.id
+    WHERE m.team_id = ?
+  `).all(req.user.team_id);
+  const factoryRecords = db.prepare(`
+    SELECT c.*, 'factory' AS record_kind, p.name AS product_name, p.unit AS product_unit,
+      p.image_path AS product_image, u.display_name AS user_name
+    FROM product_changes c
+    LEFT JOIN products p ON c.product_id = p.id
+    LEFT JOIN users u ON c.user_id = u.id
+    WHERE c.team_id = ? AND c.field LIKE '待出货%'
+  `).all(req.user.team_id);
+
+  let records = type === 'factory'
+    ? factoryRecords
+    : type === 'in' || type === 'out'
+      ? movementRecords.filter(record => record.type === type)
+      : [...movementRecords, ...factoryRecords];
+  if (search) records = records.filter(record => [
+    record.product_name, record.variant_size, record.variant_barcode,
+    record.field, record.old_value, record.new_value,
+  ].some(value => String(value || '').toLocaleLowerCase('zh-CN').includes(search)));
+  records.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+  const total = records.length;
+  const offset = (requestedPage - 1) * pageSize;
+  res.json({ data: records.slice(offset, offset + pageSize), total, page: requestedPage, pageSize });
+});
+
 export default router;

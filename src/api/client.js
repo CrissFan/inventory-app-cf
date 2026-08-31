@@ -1113,6 +1113,57 @@ export const getChanges = async (params = {}) => {
   return { data: { data: result.slice(from, from + pageSize), total } };
 };
 
+// 统一变更记录：普通出入库 + 工厂待出货库存变更。
+export const getActivityRecords = async (params = {}) => {
+  if (!USE_CLOUD) return api.get('/activity', { params });
+  const [movements, changes, products] = await Promise.all([
+    localDb.getAllMovements(),
+    localDb.getAllProductChanges(),
+    localDb.getAllProducts(),
+  ]);
+  const pmap = Object.fromEntries(products.map(product => [product.id, product]));
+  const movementRecords = movements.map(movement => ({
+    ...movement,
+    record_kind: 'movement',
+    product_name: movement.product_name || pmap[movement.product_id]?.name || '已删除商品',
+    product_image: movement.product_image || pmap[movement.product_id]?.image_path || null,
+    product_unit: movement.product_unit || pmap[movement.product_id]?.unit || '个',
+  }));
+  const factoryRecords = changes
+    .filter(change => String(change.field || '').startsWith('待出货'))
+    .map(change => ({
+      ...change,
+      record_kind: 'factory',
+      product_name: change.product_name || pmap[change.product_id]?.name || '已删除商品',
+      product_image: change.product_image || pmap[change.product_id]?.image_path || null,
+      product_unit: pmap[change.product_id]?.unit || '个',
+    }));
+
+  let result = params.type === 'factory'
+    ? factoryRecords
+    : params.type === 'in' || params.type === 'out'
+      ? movementRecords.filter(record => record.type === params.type)
+      : [...movementRecords, ...factoryRecords];
+  const search = String(params.search || '').trim().toLocaleLowerCase('zh-CN');
+  if (search) result = result.filter(record => [
+    record.product_name, record.variant_size, record.variant_barcode,
+    record.field, record.old_value, record.new_value,
+  ].some(value => String(value || '').toLocaleLowerCase('zh-CN').includes(search)));
+  result.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const seen = new Set();
+  result = result.filter(record => {
+    const key = `${record.record_kind}_${record.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const total = result.length;
+  const pageSize = params.pageSize || 50;
+  const from = ((params.page || 1) - 1) * pageSize;
+  requestBackgroundSync();
+  return { data: { data: result.slice(from, from + pageSize), total } };
+};
+
 // 按商品 ID 查询变更记录（商品管理页内预览用）
 export const getProductChanges = async (productId) => {
   if (!USE_CLOUD) return api.get(`/products/${productId}/changes`);
