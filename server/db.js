@@ -157,5 +157,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_product_changes_product ON product_changes(product_id, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_product_changes_team ON product_changes(team_id);
 `);
+try { db.exec("ALTER TABLE product_changes ADD COLUMN note TEXT DEFAULT ''"); } catch {}
 
 export default db;

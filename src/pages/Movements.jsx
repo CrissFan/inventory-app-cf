@@ -125,6 +125,7 @@ export default function Movements() {
                         <div className="flex items-center gap-2"><p className="truncate text-sm font-medium text-gray-900">{m.product_name || '已删除商品'}</p><span className="badge shrink-0 bg-amber-50 text-amber-700">{factoryLabel}</span>{m.product_image && <img src={m.product_image} alt="" className="h-4 w-4 shrink-0 rounded object-cover" />}</div>
                         <div className="mt-0.5 flex items-center gap-2"><span className="text-xs text-gray-400">{formatDate(m.created_at)}</span>{m.user_name && <span className="text-xs text-gray-400">· {m.user_name}</span>}</div>
                         <p className="mt-1 text-xs leading-relaxed text-gray-500"><span className="text-gray-400">{m.old_value || '无库存'}</span><span className="mx-1 text-gray-300">→</span><span>{m.new_value || '无库存'}</span></p>
+                        {m.note && <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800"><span className="font-medium">备注：</span>{m.note}</div>}
                       </div>
                     </div>
                   );

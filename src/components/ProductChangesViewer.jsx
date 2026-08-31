@@ -123,6 +123,7 @@ export default function ProductChangesViewer({ product, onClose }) {
                         ) : (
                           <p className="text-xs text-gray-500 mt-1">{c.new_value || c.field}</p>
                         )}
+                        {c.note && <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800"><span className="font-medium">备注：</span>{c.note}</div>}
                       </div>
                     </div>
                   );

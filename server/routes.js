@@ -395,6 +395,25 @@ router.get('/factory-inventory', authMiddleware, (req, res) => {
   res.json(rows.map(factoryRow));
 });
 
+router.get('/factory-inventory/history', authMiddleware, (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize, 10) || 50));
+  const search = String(req.query.search || '').trim().toLocaleLowerCase('zh-CN');
+  let records = db.prepare(`
+    SELECT c.*, p.name AS product_name, p.image_path AS product_image, u.display_name AS user_name
+    FROM product_changes c
+    LEFT JOIN products p ON c.product_id = p.id
+    LEFT JOIN users u ON c.user_id = u.id
+    WHERE c.team_id = ? AND c.field = '待出货库存录入'
+    ORDER BY c.created_at DESC
+  `).all(req.user.team_id);
+  if (search) records = records.filter(record => [record.product_name, record.old_value, record.new_value, record.note]
+    .some(value => String(value || '').toLocaleLowerCase('zh-CN').includes(search)));
+  const total = records.length;
+  const offset = (page - 1) * pageSize;
+  res.json({ data: records.slice(offset, offset + pageSize), total, page, pageSize });
+});
+
 router.put('/factory-inventory/:productId', authMiddleware, (req, res) => {
   if (!['admin', 'member'].includes(req.user.role)) return res.status(403).json({ error: '当前账号没有待出货库存编辑权限' });
   const productId = Number(req.params.productId);
@@ -413,6 +432,7 @@ router.put('/factory-inventory/:productId', authMiddleware, (req, res) => {
     quantityMap.set(id, quantity);
   }
   const accumulate = req.body?.mode === 'add';
+  const note = accumulate ? String(req.body?.note || '').trim().slice(0, 500) : '';
   if (accumulate && ![...quantityMap.values()].some(quantity => quantity > 0)) return res.status(400).json({ error: '请至少填写一个尺码的本次新增数量' });
   const existingFactory = db.prepare('SELECT * FROM factory_inventory WHERE product_id = ? AND team_id = ?').get(productId, req.user.team_id);
   let existingVariants = [];
@@ -422,17 +442,23 @@ router.put('/factory-inventory/:productId', authMiddleware, (req, res) => {
     quantity: (accumulate ? (Number(existingVariants.find(item => String(item.id) === String(variant.id))?.quantity) || 0) : 0)
       + (quantityMap.get(String(variant.id)) || 0),
   }));
+  const addedSummary = normalized.variants
+    .filter(variant => (quantityMap.get(String(variant.id)) || 0) > 0)
+    .map(variant => `${variant.size || '未命名尺码'} +${quantityMap.get(String(variant.id))}`)
+    .join('、');
   try {
     const save = db.transaction(() => {
       db.prepare(`
         INSERT INTO factory_inventory(team_id, product_id, status, variants) VALUES (?, ?, 'doing', ?)
         ON CONFLICT(team_id, product_id) DO UPDATE SET variants = excluded.variants, updated_at = datetime('now', 'localtime')
       `).run(req.user.team_id, productId, JSON.stringify(variants));
-      db.prepare('INSERT INTO product_changes (product_id, team_id, user_id, field, old_value, new_value) VALUES (?, ?, ?, ?, ?, ?)')
+      db.prepare('INSERT INTO product_changes (product_id, team_id, user_id, field, old_value, new_value, note) VALUES (?, ?, ?, ?, ?, ?, ?)')
         .run(
           productId, req.user.team_id, req.user.id,
           accumulate ? '待出货库存录入' : '待出货库存调整',
-          summarizeFactoryVariants(existingVariants), summarizeFactoryVariants(variants),
+          accumulate ? `原待出货：${summarizeFactoryVariants(existingVariants)}` : summarizeFactoryVariants(existingVariants),
+          accumulate ? `本次录入：${addedSummary}；当前待出货：${summarizeFactoryVariants(variants)}` : summarizeFactoryVariants(variants),
+          note,
         );
       return factoryRow(db.prepare(`${factoryInventorySelect} WHERE f.team_id = ? AND f.product_id = ?`).get(req.user.team_id, productId));
     });
@@ -777,7 +803,7 @@ router.get('/activity', authMiddleware, (req, res) => {
       : [...movementRecords, ...factoryRecords];
   if (search) records = records.filter(record => [
     record.product_name, record.variant_size, record.variant_barcode,
-    record.field, record.old_value, record.new_value,
+    record.field, record.old_value, record.new_value, record.note,
   ].some(value => String(value || '').toLocaleLowerCase('zh-CN').includes(search)));
   records.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 

@@ -12,12 +12,14 @@ CREATE TABLE IF NOT EXISTS product_changes (
   new_value TEXT DEFAULT '',
   product_name TEXT DEFAULT '',
   product_image TEXT DEFAULT '',
+  note TEXT DEFAULT '',
   created_at TIMESTAMPTZ DEFAULT now(),
   synced_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_product_changes_team ON product_changes(team_id);
 CREATE INDEX IF NOT EXISTS idx_product_changes_product ON product_changes(product_id);
 CREATE INDEX IF NOT EXISTS idx_product_changes_created ON product_changes(created_at DESC);
+ALTER TABLE product_changes ADD COLUMN IF NOT EXISTS note TEXT DEFAULT '';
 
 -- RLS 策略：仅团队成员可读写
 ALTER TABLE product_changes ENABLE ROW LEVEL SECURITY;

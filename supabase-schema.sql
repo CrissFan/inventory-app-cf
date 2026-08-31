@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS product_changes (
   new_value TEXT DEFAULT '',
   product_name TEXT DEFAULT '',
   product_image TEXT DEFAULT '',
+  note TEXT DEFAULT '',
   created_at TIMESTAMPTZ DEFAULT now(),
   synced_at TIMESTAMPTZ DEFAULT now()
 );
@@ -135,6 +136,7 @@ ALTER TABLE product_changes
   ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'update' CHECK (action IN ('create', 'update', 'delete')),
   ADD COLUMN IF NOT EXISTS product_name TEXT DEFAULT '',
   ADD COLUMN IF NOT EXISTS product_image TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS note TEXT DEFAULT '',
   ADD COLUMN IF NOT EXISTS synced_at TIMESTAMPTZ DEFAULT now();
 
 -- ===================================================================
@@ -984,12 +986,13 @@ END;
 $$;
 
 -- 重复录入采用增量合并，不覆盖已有 doing 数量。
-CREATE OR REPLACE FUNCTION add_factory_inventory(p_product_id BIGINT, p_variant_ids TEXT[], p_quantities INTEGER[])
+DROP FUNCTION IF EXISTS add_factory_inventory(BIGINT, TEXT[], INTEGER[]);
+CREATE OR REPLACE FUNCTION add_factory_inventory(p_product_id BIGINT, p_variant_ids TEXT[], p_quantities INTEGER[], p_note TEXT DEFAULT '')
 RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   v_team_id UUID; v_role TEXT; v_user_name TEXT; v_product products%ROWTYPE; v_existing factory_inventory%ROWTYPE;
   v_variants JSONB; v_record factory_inventory%ROWTYPE; v_change product_changes%ROWTYPE;
-  v_count INTEGER; v_old_summary TEXT; v_new_summary TEXT;
+  v_count INTEGER; v_old_summary TEXT; v_new_summary TEXT; v_added_summary TEXT;
 BEGIN
   SELECT member.team_id, member.role, member.display_name INTO v_team_id, v_role, v_user_name FROM team_members member WHERE member.user_id = auth.uid() LIMIT 1;
   IF v_team_id IS NULL OR v_role NOT IN ('admin', 'member') THEN RAISE EXCEPTION '无待出货库存录入权限'; END IF;
@@ -1027,12 +1030,22 @@ BEGIN
   ), '无库存') INTO v_new_summary
   FROM jsonb_array_elements(COALESCE(v_record.variants, '[]'::JSONB)) WITH ORDINALITY AS item(value, position)
   WHERE COALESCE((item.value->>'quantity')::INTEGER, 0) > 0;
+  SELECT COALESCE(string_agg(
+    format('%s +%s', COALESCE((
+      SELECT variant->>'size' FROM jsonb_array_elements(v_product.variants) variant
+      WHERE variant->>'id' = p_variant_ids[position] LIMIT 1
+    ), p_variant_ids[position]), p_quantities[position]),
+    '、' ORDER BY position
+  ), '无') INTO v_added_summary
+  FROM generate_subscripts(p_variant_ids, 1) position
+  WHERE p_quantities[position] > 0;
   INSERT INTO product_changes(
     team_id, product_id, user_id, user_name, action, field,
-    old_value, new_value, product_name, product_image, created_at, synced_at
+    old_value, new_value, product_name, product_image, note, created_at, synced_at
   ) VALUES (
     v_team_id, v_product.id, auth.uid(), COALESCE(v_user_name, ''), 'update', '待出货库存录入',
-    v_old_summary, v_new_summary, v_product.name, COALESCE(v_product.image_url, ''), now(), now()
+    format('原待出货：%s', v_old_summary), format('本次录入：%s；当前待出货：%s', v_added_summary, v_new_summary),
+    v_product.name, COALESCE(v_product.image_url, ''), LEFT(BTRIM(COALESCE(p_note, '')), 500), now(), now()
   ) RETURNING * INTO v_change;
   RETURN jsonb_build_object('factory', to_jsonb(v_record), 'product', to_jsonb(v_product), 'change', to_jsonb(v_change));
 END;
@@ -1131,10 +1144,10 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION set_factory_inventory(BIGINT, TEXT[], INTEGER[]) FROM PUBLIC;
-REVOKE ALL ON FUNCTION add_factory_inventory(BIGINT, TEXT[], INTEGER[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION add_factory_inventory(BIGINT, TEXT[], INTEGER[], TEXT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION transfer_factory_inventory(BIGINT, TEXT[], INTEGER[], TEXT, TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION set_factory_inventory(BIGINT, TEXT[], INTEGER[]) TO authenticated;
-GRANT EXECUTE ON FUNCTION add_factory_inventory(BIGINT, TEXT[], INTEGER[]) TO authenticated;
+GRANT EXECUTE ON FUNCTION add_factory_inventory(BIGINT, TEXT[], INTEGER[], TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION transfer_factory_inventory(BIGINT, TEXT[], INTEGER[], TEXT, TEXT) TO authenticated;
 
 

@@ -924,19 +924,21 @@ export const setFactoryInventory = async (productId, variants) => {
   return { data: normalizeFactoryItem({ ...data.factory, product: data.product }) };
 };
 
-export const addFactoryInventory = async (productId, variants) => {
+export const addFactoryInventory = async (productId, variants, note = '') => {
   assertCanWrite();
   const clean = (variants || []).map(variant => ({
     id: variant.id,
     quantity: Math.max(0, Number.parseInt(variant.quantity, 10) || 0),
   }));
   if (!clean.some(variant => variant.quantity > 0)) throw new Error('请至少填写一个尺码的本次新增数量');
-  if (!USE_CLOUD) return api.put(`/factory-inventory/${productId}`, { variants: clean, mode: 'add' });
+  const cleanNote = String(note || '').trim().slice(0, 500);
+  if (!USE_CLOUD) return api.put(`/factory-inventory/${productId}`, { variants: clean, mode: 'add', note: cleanNote });
   if (navigator.onLine === false) throw new Error('待出货库存录入需要连接云端，请联网后重试');
   const { data, error } = await supabase.rpc('add_factory_inventory', {
     p_product_id: Number(productId),
     p_variant_ids: clean.map(variant => variant.id),
     p_quantities: clean.map(variant => variant.quantity),
+    p_note: cleanNote,
   });
   if (error) {
     if (/add_factory_inventory|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库增量录入接口尚未部署，请重新执行 factory-inventory-migration.sql');
@@ -1113,6 +1115,31 @@ export const getChanges = async (params = {}) => {
   return { data: { data: result.slice(from, from + pageSize), total } };
 };
 
+export const getFactoryInventoryHistory = async (params = {}) => {
+  if (!USE_CLOUD) return api.get('/factory-inventory/history', { params });
+  const [changes, products] = await Promise.all([
+    localDb.getAllProductChanges(),
+    localDb.getAllProducts(),
+  ]);
+  const pmap = Object.fromEntries(products.map(product => [product.id, product]));
+  const search = String(params.search || '').trim().toLocaleLowerCase('zh-CN');
+  let result = changes
+    .filter(change => change.field === '待出货库存录入')
+    .map(change => ({
+      ...change,
+      product_name: change.product_name || pmap[change.product_id]?.name || '已删除商品',
+      product_image: change.product_image || pmap[change.product_id]?.image_path || null,
+    }));
+  if (search) result = result.filter(record => [record.product_name, record.old_value, record.new_value, record.note]
+    .some(value => String(value || '').toLocaleLowerCase('zh-CN').includes(search)));
+  result.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const total = result.length;
+  const pageSize = params.pageSize || 50;
+  const from = ((params.page || 1) - 1) * pageSize;
+  requestBackgroundSync();
+  return { data: { data: result.slice(from, from + pageSize), total } };
+};
+
 // 统一变更记录：普通出入库 + 工厂待出货库存变更。
 export const getActivityRecords = async (params = {}) => {
   if (!USE_CLOUD) return api.get('/activity', { params });
@@ -1147,7 +1174,7 @@ export const getActivityRecords = async (params = {}) => {
   const search = String(params.search || '').trim().toLocaleLowerCase('zh-CN');
   if (search) result = result.filter(record => [
     record.product_name, record.variant_size, record.variant_barcode,
-    record.field, record.old_value, record.new_value,
+    record.field, record.old_value, record.new_value, record.note,
   ].some(value => String(value || '').toLocaleLowerCase('zh-CN').includes(search)));
   result.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   const seen = new Set();
