@@ -10,6 +10,7 @@ import Movements from './pages/Movements';
 import Team from './pages/Team';
 import Tags from './pages/Tags';
 import Monitoring from './pages/Monitoring';
+import FactoryInventory from './pages/FactoryInventory';
 import Login from './pages/Login';
 
 function AppContent() {
@@ -53,6 +54,7 @@ function AppContent() {
         case 'movements': return <Movements />;
         case 'tags': return <Tags />;
         case 'monitoring': return <Monitoring />;
+        case 'factory': return <FactoryInventory />;
         case 'team': return <Team />;
         default: return <Dashboard onNavigate={navigate} canManage={!isViewer} />;
       }

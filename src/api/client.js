@@ -459,6 +459,7 @@ const normalizeProduct = (p) => {
     updated_at: p.updated_at || p.created_at || p.synced_at || null,
     image_path: p.image_path || p.image_url || '',
     stock_alert_disabled: toBoolean(p.stock_alert_disabled),
+    status: p.status || 'done',
   };
 };
 
@@ -867,6 +868,88 @@ async function changeStock(type, data) {
 export const stockIn = async (data) => changeStock('in', data);
 
 export const stockOut = async (data) => changeStock('out', data);
+
+// =============== Factory Pending Inventory API ===============
+
+const normalizeFactoryItem = row => {
+  const product = normalizeProduct(row.product || row.products || {});
+  const variants = Array.isArray(row.variants) ? row.variants.map(variant => ({
+    ...variant,
+    quantity: Math.max(0, Number(variant.quantity) || 0),
+  })) : [];
+  return {
+    ...row,
+    status: 'doing',
+    variants,
+    total_quantity: variants.reduce((sum, variant) => sum + variant.quantity, 0),
+    product,
+  };
+};
+
+export const getFactoryInventory = async () => {
+  if (!USE_CLOUD) return api.get('/factory-inventory');
+  const teamId = await localDb.getMeta('team_id');
+  if (!teamId) throw new Error('缺少团队信息，请重新登录');
+  const { data, error } = await supabase.from('factory_inventory')
+    .select('*, product:products(*)')
+    .eq('team_id', teamId)
+    .order('updated_at', { ascending: false });
+  if (error) {
+    if (/factory_inventory|schema cache|does not exist/i.test(error.message || '')) throw new Error('数据库待出货功能尚未部署，请先执行 factory-inventory-migration.sql');
+    throw new Error(error.message || '读取待出货库存失败');
+  }
+  return { data: (data || []).map(normalizeFactoryItem) };
+};
+
+export const setFactoryInventory = async (productId, variants) => {
+  assertCanWrite();
+  const clean = (variants || []).map(variant => ({
+    id: variant.id,
+    quantity: Math.max(0, Number.parseInt(variant.quantity, 10) || 0),
+  }));
+  if (!clean.length) throw new Error('商品至少需要一个尺码');
+  if (!USE_CLOUD) return api.put(`/factory-inventory/${productId}`, { variants: clean });
+  if (navigator.onLine === false) throw new Error('待出货库存录入需要连接云端，请联网后重试');
+  const { data, error } = await supabase.rpc('set_factory_inventory', {
+    p_product_id: Number(productId),
+    p_variant_ids: clean.map(variant => variant.id),
+    p_quantities: clean.map(variant => variant.quantity),
+  });
+  if (error) {
+    if (/set_factory_inventory|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库待出货功能尚未部署，请先执行 factory-inventory-migration.sql');
+    throw new Error(error.message || '保存待出货库存失败');
+  }
+  return { data: normalizeFactoryItem({ ...data.factory, product: data.product }) };
+};
+
+export const transferFactoryInventory = async (productId, variants, operator = '') => {
+  assertCanWrite();
+  const clean = (variants || []).map(variant => ({ id: variant.id, quantity: Number(variant.quantity) }))
+    .filter(variant => Number.isInteger(variant.quantity) && variant.quantity > 0);
+  if (!clean.length) throw new Error('请至少填写一个尺码的入库数量');
+  if (!USE_CLOUD) return api.post(`/factory-inventory/${productId}/transfer`, { variants: clean, operator });
+  if (navigator.onLine === false) throw new Error('待出货转仓库需要连接云端，请联网后重试');
+  const { data, error } = await supabase.rpc('transfer_factory_inventory', {
+    p_product_id: Number(productId),
+    p_variant_ids: clean.map(variant => variant.id),
+    p_quantities: clean.map(variant => variant.quantity),
+    p_operator: operator || '',
+    p_client_operation_id: operationId('factory_transfer'),
+  });
+  if (error) {
+    if (/transfer_factory_inventory|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库待出货功能尚未部署，请先执行 factory-inventory-migration.sql');
+    throw new Error(error.message || '待出货商品入库失败');
+  }
+  if (data?.product) await localDb.upsertProduct(normalizeProduct(data.product));
+  for (const movement of data?.movements || []) await localDb.upsertMovement(movement);
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
+  requestBackgroundSync();
+  return { data: {
+    ...data,
+    product: data?.product ? normalizeProduct(data.product) : null,
+    factory: data?.factory ? normalizeFactoryItem({ ...data.factory, product: data.product }) : null,
+  } };
+};
 
 export const batchStockIn = async (items) => {
   assertCanWrite();

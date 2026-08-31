@@ -19,7 +19,26 @@ const productRow = (row) => {
     current_stock: Number(variant.current_stock) || 0,
     min_stock: Number(variant.min_stock ?? row.min_stock) || 0,
   })) : [];
-  return { ...row, barcode: '', variants, stock_alert_disabled: Boolean(row.stock_alert_disabled) };
+  return { ...row, barcode: '', variants, stock_alert_disabled: Boolean(row.stock_alert_disabled), status: row.status || 'done' };
+};
+
+const factoryRow = (row) => {
+  if (!row) return row;
+  let variants = [];
+  try { variants = JSON.parse(row.factory_variants ?? row.variants ?? '[]'); } catch {}
+  variants = Array.isArray(variants) ? variants.map(variant => ({ ...variant, quantity: Math.max(0, Number(variant.quantity) || 0) })) : [];
+  const product = productRow({
+    id: row.product_id, team_id: row.team_id, name: row.product_name, description: row.product_description,
+    category: row.product_category, sub_tags: row.product_sub_tags, unit: row.product_unit,
+    image_path: row.product_image, variants: row.product_variants, current_stock: row.product_current_stock,
+    min_stock: row.product_min_stock, stock_alert_disabled: row.product_stock_alert_disabled, status: 'done',
+    created_at: row.product_created_at, updated_at: row.product_updated_at,
+  });
+  return {
+    id: row.id, team_id: row.team_id, product_id: row.product_id, status: 'doing', variants,
+    total_quantity: variants.reduce((sum, variant) => sum + variant.quantity, 0),
+    created_at: row.created_at, updated_at: row.updated_at, product,
+  };
 };
 
 const assertUniqueVariantBarcodes = (teamId, variants, excludeId = null) => {
@@ -354,6 +373,104 @@ router.post('/upload', authMiddleware, upload.single('image'), (req, res) => {
 });
 
 // ============ Stock In / Out (auth required) ============
+
+const factoryInventorySelect = `
+  SELECT f.id, f.team_id, f.product_id, f.status, f.variants AS factory_variants, f.created_at, f.updated_at,
+    p.name AS product_name, p.description AS product_description, p.category AS product_category,
+    p.sub_tags AS product_sub_tags, p.unit AS product_unit, p.image_path AS product_image,
+    p.variants AS product_variants, p.current_stock AS product_current_stock, p.min_stock AS product_min_stock,
+    p.stock_alert_disabled AS product_stock_alert_disabled, p.created_at AS product_created_at, p.updated_at AS product_updated_at
+  FROM factory_inventory f JOIN products p ON p.id = f.product_id
+`;
+
+router.get('/factory-inventory', authMiddleware, (req, res) => {
+  const rows = db.prepare(`${factoryInventorySelect} WHERE f.team_id = ? ORDER BY f.updated_at DESC`).all(req.user.team_id);
+  res.json(rows.map(factoryRow));
+});
+
+router.put('/factory-inventory/:productId', authMiddleware, (req, res) => {
+  if (!['admin', 'member'].includes(req.user.role)) return res.status(403).json({ error: '当前账号没有待出货库存编辑权限' });
+  const productId = Number(req.params.productId);
+  const inputVariants = Array.isArray(req.body?.variants) ? req.body.variants : [];
+  const product = db.prepare('SELECT * FROM products WHERE id = ? AND team_id = ?').get(productId, req.user.team_id);
+  if (!product) return res.status(404).json({ error: '销售商品不存在' });
+  const normalized = productRow(product);
+  if (!inputVariants.length) return res.status(400).json({ error: '商品至少需要一个尺码' });
+  const quantityMap = new Map();
+  for (const input of inputVariants) {
+    const id = String(input.id || '');
+    const quantity = Number(input.quantity);
+    if (!id || !Number.isInteger(quantity) || quantity < 0) return res.status(400).json({ error: '待出货数量必须是非负整数' });
+    if (quantityMap.has(id)) return res.status(400).json({ error: '尺码参数不能重复' });
+    if (!normalized.variants.some(variant => String(variant.id) === id)) return res.status(400).json({ error: '待出货数据包含无效尺码' });
+    quantityMap.set(id, quantity);
+  }
+  const variants = normalized.variants.map(variant => ({
+    id: variant.id, size: variant.size || '', barcode: variant.barcode || '', quantity: quantityMap.get(String(variant.id)) || 0,
+  }));
+  try {
+    db.prepare(`
+      INSERT INTO factory_inventory(team_id, product_id, status, variants) VALUES (?, ?, 'doing', ?)
+      ON CONFLICT(team_id, product_id) DO UPDATE SET variants = excluded.variants, updated_at = datetime('now', 'localtime')
+    `).run(req.user.team_id, productId, JSON.stringify(variants));
+    const row = db.prepare(`${factoryInventorySelect} WHERE f.team_id = ? AND f.product_id = ?`).get(req.user.team_id, productId);
+    res.json(factoryRow(row));
+  } catch (error) {
+    res.status(400).json({ error: error.message || '保存待出货库存失败' });
+  }
+});
+
+router.post('/factory-inventory/:productId/transfer', authMiddleware, (req, res) => {
+  if (!['admin', 'member'].includes(req.user.role)) return res.status(403).json({ error: '当前账号没有待出货入库权限' });
+  const productId = Number(req.params.productId);
+  const inputVariants = Array.isArray(req.body?.variants) ? req.body.variants : [];
+  try {
+    const transfer = db.transaction(() => {
+      const product = db.prepare('SELECT * FROM products WHERE id = ? AND team_id = ?').get(productId, req.user.team_id);
+      const factory = db.prepare('SELECT * FROM factory_inventory WHERE product_id = ? AND team_id = ?').get(productId, req.user.team_id);
+      if (!product) throw new Error('销售商品不存在');
+      if (!factory) throw new Error('该商品没有待出货库存');
+      const normalized = productRow(product);
+      let pending = [];
+      try { pending = JSON.parse(factory.variants || '[]'); } catch {}
+      const quantityMap = new Map();
+      for (const input of inputVariants) {
+        const id = String(input.id || '');
+        const quantity = Number(input.quantity);
+        if (!id || !Number.isInteger(quantity) || quantity <= 0) throw new Error('入库数量必须是大于0的整数');
+        if (quantityMap.has(id)) throw new Error('尺码参数不能重复');
+        const pendingVariant = pending.find(variant => String(variant.id) === id);
+        if (!pendingVariant) throw new Error('待出货商品尺码不存在');
+        if ((Number(pendingVariant.quantity) || 0) < quantity) throw new Error(`尺码 ${pendingVariant.size} 待出货数量不足，当前数量 ${pendingVariant.quantity || 0}`);
+        quantityMap.set(id, quantity);
+      }
+      if (!quantityMap.size) throw new Error('请至少填写一个尺码的入库数量');
+      const nextProductVariants = normalized.variants.map(variant => ({
+        ...variant, current_stock: (Number(variant.current_stock) || 0) + (quantityMap.get(String(variant.id)) || 0),
+      }));
+      const nextPending = pending.map(variant => ({
+        ...variant, quantity: (Number(variant.quantity) || 0) - (quantityMap.get(String(variant.id)) || 0),
+      }));
+      db.prepare("UPDATE products SET variants = ?, current_stock = ?, updated_at = datetime('now', 'localtime') WHERE id = ?")
+        .run(JSON.stringify(nextProductVariants), nextProductVariants.reduce((sum, variant) => sum + variant.current_stock, 0), productId);
+      db.prepare("UPDATE factory_inventory SET variants = ?, updated_at = datetime('now', 'localtime') WHERE id = ?")
+        .run(JSON.stringify(nextPending), factory.id);
+      const movements = [];
+      for (const [variantId, quantity] of quantityMap) {
+        const variant = normalized.variants.find(item => String(item.id) === variantId);
+        const info = db.prepare("INSERT INTO stock_movements(product_id, team_id, user_id, type, quantity, reason, operator, variant_id, variant_size, variant_barcode) VALUES (?, ?, ?, 'in', ?, '工厂待出货入库', ?, ?, ?, ?)")
+          .run(productId, req.user.team_id, req.user.id, quantity, req.body.operator || req.user.display_name, variant.id, variant.size, variant.barcode);
+        movements.push(db.prepare('SELECT * FROM stock_movements WHERE id = ?').get(info.lastInsertRowid));
+      }
+      const updatedProduct = productRow(db.prepare('SELECT * FROM products WHERE id = ?').get(productId));
+      const updatedFactory = factoryRow(db.prepare(`${factoryInventorySelect} WHERE f.team_id = ? AND f.product_id = ?`).get(req.user.team_id, productId));
+      return { product: updatedProduct, factory: updatedFactory, movements };
+    });
+    res.json(transfer());
+  } catch (error) {
+    res.status(400).json({ error: error.message || '待出货商品入库失败' });
+  }
+});
 
 router.post('/stock/in/batch', authMiddleware, (req, res) => {
   if (!['admin', 'member'].includes(req.user.role)) return res.status(403).json({ error: '当前账号没有入库权限' });

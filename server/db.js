@@ -49,6 +49,7 @@ db.exec(`
     current_stock INTEGER DEFAULT 0,
     min_stock INTEGER DEFAULT 0,
     stock_alert_disabled INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'done' CHECK(status IN ('doing', 'done')),
     created_at TEXT DEFAULT (datetime('now', 'localtime')),
     updated_at TEXT DEFAULT (datetime('now', 'localtime'))
   );
@@ -72,6 +73,7 @@ try { db.exec('ALTER TABLE stock_movements ADD COLUMN user_id INTEGER'); } catch
 try { db.exec("ALTER TABLE products ADD COLUMN sub_tags TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE products ADD COLUMN variants TEXT DEFAULT '[]'"); } catch {}
 try { db.exec('ALTER TABLE products ADD COLUMN stock_alert_disabled INTEGER NOT NULL DEFAULT 0'); } catch {}
+try { db.exec("ALTER TABLE products ADD COLUMN status TEXT NOT NULL DEFAULT 'done'"); } catch {}
 try { db.exec("ALTER TABLE stock_movements ADD COLUMN variant_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE stock_movements ADD COLUMN variant_size TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE stock_movements ADD COLUMN variant_barcode TEXT DEFAULT ''"); } catch {}
@@ -103,6 +105,24 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_movements_type ON stock_movements(type);
   CREATE INDEX IF NOT EXISTS idx_movements_created_at ON stock_movements(created_at);
   CREATE INDEX IF NOT EXISTS idx_users_team ON users(team_id);
+`);
+
+// Factory pending inventory — quantities that have not yet entered sellable warehouse stock.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS factory_inventory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL,
+    product_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'doing' CHECK(status = 'doing'),
+    variants TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
+    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+    UNIQUE(team_id, product_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_factory_inventory_team ON factory_inventory(team_id);
+  CREATE INDEX IF NOT EXISTS idx_factory_inventory_product ON factory_inventory(product_id);
 `);
 // Tags/Categories table — team-scoped custom tags
 db.exec(`

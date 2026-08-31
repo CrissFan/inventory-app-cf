@@ -74,6 +74,7 @@ function normalizeProduct(product) {
     updated_at: product.updated_at || product.created_at || product.synced_at || null,
     image_path: product.image_path || product.image_url || '',
     stock_alert_disabled: toBoolean(product.stock_alert_disabled),
+    status: product.status || 'done',
   };
 }
 
@@ -437,7 +438,7 @@ function subscribeRealtime(teamId) {
   const supabase = getSupabase();
   if (realtimeChannel) supabase.removeChannel(realtimeChannel);
   realtimeChannel = supabase.channel(`inventory:${teamId}`);
-  for (const table of ['products', 'tags', 'stock_movements', 'product_changes']) {
+  for (const table of ['products', 'tags', 'stock_movements', 'product_changes', 'factory_inventory']) {
     realtimeChannel.on('postgres_changes', {
       event: '*', schema: 'public', table, filter: `team_id=eq.${teamId}`,
     }, () => {

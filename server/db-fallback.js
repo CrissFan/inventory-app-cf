@@ -13,7 +13,7 @@ if (!fs.existsSync(dataDir)) {
 
 const dbPath = path.join(dataDir, 'inventory.json');
 
-let data = { products: [], movements: [], nextProductId: 1, nextMovementId: 1 };
+let data = { products: [], movements: [], factoryInventory: [], nextProductId: 1, nextMovementId: 1, nextFactoryId: 1 };
 
 if (fs.existsSync(dbPath)) {
   try {
@@ -22,6 +22,8 @@ if (fs.existsSync(dbPath)) {
     console.error('Failed to parse DB file, starting fresh:', e.message);
   }
 }
+if (!Array.isArray(data.factoryInventory)) data.factoryInventory = [];
+if (!data.nextFactoryId) data.nextFactoryId = Math.max(0, ...data.factoryInventory.map(item => Number(item.id) || 0)) + 1;
 
 function save() {
   fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
@@ -36,6 +38,20 @@ const db = {
     // Simple query builder for our specific use cases
     return {
       all(params = {}) {
+        if (sql.includes('FROM factory_inventory')) {
+          const values = Array.isArray(params) ? params : (typeof params === 'object' ? Object.values(params) : [params]);
+          const teamId = values[0];
+          return data.factoryInventory.filter(item => item.team_id === teamId || item.team_id === Number(teamId)).map(item => {
+            const product = data.products.find(value => value.id === item.product_id || value.id === Number(item.product_id)) || {};
+            return {
+              ...item, factory_variants: item.variants,
+              product_name: product.name, product_description: product.description, product_category: product.category,
+              product_sub_tags: product.sub_tags, product_unit: product.unit, product_image: product.image_path,
+              product_variants: product.variants, product_current_stock: product.current_stock, product_min_stock: product.min_stock,
+              product_stock_alert_disabled: product.stock_alert_disabled, product_created_at: product.created_at, product_updated_at: product.updated_at,
+            };
+          }).sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+        }
         if (sql.includes('FROM products') && !sql.includes('stock_movements')) {
           let rows = [...data.products];
           if (params.search) {
@@ -70,7 +86,21 @@ const db = {
         }
         return [];
       },
-      get(params) {
+      get(...inputArgs) {
+        const params = inputArgs.length === 1 ? inputArgs[0] : inputArgs;
+        if (sql.includes('FROM factory_inventory')) {
+          const values = Array.isArray(params) ? params : (typeof params === 'object' ? Object.values(params) : [params]);
+          const productId = sql.includes('product_id = ? AND team_id = ?') ? values[0] : values[1];
+          const teamId = sql.includes('product_id = ? AND team_id = ?') ? values[1] : values[0];
+          const item = data.factoryInventory.find(value => (value.product_id === productId || value.product_id === Number(productId)) && (value.team_id === teamId || value.team_id === Number(teamId)));
+          if (!item) return undefined;
+          const product = data.products.find(value => value.id === item.product_id || value.id === Number(item.product_id)) || {};
+          return { ...item, factory_variants: item.variants, product_name: product.name, product_description: product.description, product_category: product.category, product_sub_tags: product.sub_tags, product_unit: product.unit, product_image: product.image_path, product_variants: product.variants, product_current_stock: product.current_stock, product_min_stock: product.min_stock, product_stock_alert_disabled: product.stock_alert_disabled, product_created_at: product.created_at, product_updated_at: product.updated_at };
+        }
+        if (Array.isArray(params)) {
+          if (sql.includes('FROM products')) return data.products.find(product => product.id === Number(params[0]));
+          if (sql.includes('FROM stock_movements')) return data.movements.find(movement => movement.id === Number(params[0]));
+        }
         if (typeof params === 'number' || typeof params === 'string') {
           const id = parseInt(params);
           if (sql.includes('SELECT COUNT')) return { total: data.movements.length };
@@ -109,6 +139,7 @@ const db = {
             if (idx >= 0) {
               data.products.splice(idx, 1);
               data.movements = data.movements.filter(m => m.product_id !== id);
+              data.factoryInventory = data.factoryInventory.filter(item => item.product_id !== id);
               save();
               return { changes: 1 };
             }
@@ -127,6 +158,23 @@ const db = {
               save();
               return { changes: 1 };
             }
+            return { changes: 0 };
+          }
+          if (sql.includes('INSERT INTO factory_inventory')) {
+            const [teamId, productId, variants] = params;
+            let item = data.factoryInventory.find(value => (value.team_id === teamId || value.team_id === Number(teamId)) && (value.product_id === productId || value.product_id === Number(productId)));
+            if (item) { item.variants = variants; item.updated_at = now(); }
+            else {
+              item = { id: data.nextFactoryId++, team_id: teamId, product_id: productId, status: 'doing', variants, created_at: now(), updated_at: now() };
+              data.factoryInventory.push(item);
+            }
+            save();
+            return { changes: 1, lastInsertRowid: item.id };
+          }
+          if (sql.includes('UPDATE factory_inventory SET variants = ?')) {
+            const [variants, id] = params;
+            const item = data.factoryInventory.find(value => value.id === id || value.id === Number(id));
+            if (item) { item.variants = variants; item.updated_at = now(); save(); return { changes: 1 }; }
             return { changes: 0 };
           }
           if (sql.includes('current_stock = current_stock +')) {
