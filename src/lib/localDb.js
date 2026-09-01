@@ -6,7 +6,7 @@
 import { openDB } from 'idb';
 
 const DB_NAME = 'inventory_local';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 let dbPromise = null;
 
@@ -56,6 +56,14 @@ function getDb() {
           changesStore.createIndex('product_id', 'product_id', { unique: false });
           changesStore.createIndex('team_id', 'team_id', { unique: false });
           changesStore.createIndex('created_at', 'created_at', { unique: false });
+        }
+
+        // 工厂待出货库存缓存。云端仍是唯一事实源，本表用于快速展示和断网读取。
+        if (!db.objectStoreNames.contains('factory_inventory')) {
+          const factoryStore = db.createObjectStore('factory_inventory', { keyPath: 'id' });
+          factoryStore.createIndex('product_id', 'product_id', { unique: false });
+          factoryStore.createIndex('team_id', 'team_id', { unique: false });
+          factoryStore.createIndex('updated_at', 'updated_at', { unique: false });
         }
       },
     });
@@ -125,7 +133,7 @@ export async function deleteProducts(ids) {
 export async function deleteProductsWithRelatedData(ids) {
   const db = await getDb();
   const idSet = new Set(ids.map(id => String(id)));
-  const tx = db.transaction(['products', 'stock_movements', 'product_changes', 'sync_queue'], 'readwrite');
+  const tx = db.transaction(['products', 'stock_movements', 'product_changes', 'factory_inventory', 'sync_queue'], 'readwrite');
   for (const id of ids) await tx.objectStore('products').delete(id);
 
   const movements = await tx.objectStore('stock_movements').getAll();
@@ -136,6 +144,11 @@ export async function deleteProductsWithRelatedData(ids) {
   const changes = await tx.objectStore('product_changes').getAll();
   for (const change of changes) {
     if (idSet.has(String(change.product_id))) await tx.objectStore('product_changes').delete(change.id);
+  }
+
+  const factoryItems = await tx.objectStore('factory_inventory').getAll();
+  for (const item of factoryItems) {
+    if (idSet.has(String(item.product_id))) await tx.objectStore('factory_inventory').delete(item.id);
   }
 
   const queue = await tx.objectStore('sync_queue').getAll();
@@ -232,6 +245,27 @@ export async function replaceProductChanges(changes) {
   await tx.done;
 }
 
+// =============== 工厂待出货库存 ===============
+
+export async function getAllFactoryInventory() {
+  const db = await getDb();
+  return db.getAll('factory_inventory');
+}
+
+export async function upsertFactoryInventory(item) {
+  if (!item?.id) return;
+  const db = await getDb();
+  await db.put('factory_inventory', item);
+}
+
+export async function replaceFactoryInventory(items) {
+  const db = await getDb();
+  const tx = db.transaction('factory_inventory', 'readwrite');
+  await tx.store.clear();
+  for (const item of items) await tx.store.put(item);
+  await tx.done;
+}
+
 // =============== 标签 ===============
 
 export async function getAllTags() {
@@ -325,14 +359,15 @@ export async function activateCacheScope(userId, teamId) {
 
 export async function getLocalSnapshot() {
   const db = await getDb();
-  const [products, movements, tags, productChanges, syncQueue] = await Promise.all([
+  const [products, movements, tags, productChanges, factoryInventory, syncQueue] = await Promise.all([
     db.getAll('products'),
     db.getAll('stock_movements'),
     db.getAll('tags'),
     db.getAll('product_changes'),
+    db.getAll('factory_inventory'),
     db.getAll('sync_queue'),
   ]);
-  return { products, movements, tags, productChanges, syncQueue };
+  return { products, movements, tags, productChanges, factoryInventory, syncQueue };
 }
 
 // =============== 批量清空 ===============
@@ -343,5 +378,6 @@ export async function clearAll() {
   await db.clear('stock_movements');
   await db.clear('tags');
   await db.clear('product_changes');
+  await db.clear('factory_inventory');
   await db.clear('sync_queue');
 }

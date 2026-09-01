@@ -1,21 +1,28 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Package, AlertTriangle, Boxes, ArrowDownToLine, ArrowUpFromLine, X, CalendarDays, CircleCheck } from 'lucide-react';
-import { getInventory, getMovements } from '../api/client';
+import { Package, AlertTriangle, Boxes, ArrowDownToLine, ArrowUpFromLine, X, CalendarDays, CircleCheck, Factory } from 'lucide-react';
+import { getFactoryInventory, getFactoryInventoryHistory, getInventory, getMovements } from '../api/client';
 import useSyncRefresh from '../lib/useSyncRefresh';
 
 export default function Dashboard({ onNavigate, canManage = true }) {
   const [data, setData] = useState(null);
   const [movements, setMovements] = useState([]);
+  const [factoryItems, setFactoryItems] = useState([]);
+  const [factoryHistory, setFactoryHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [detailType, setDetailType] = useState(null);
   const [showLowStockDetails, setShowLowStockDetails] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
-      const [invRes, movRes] = await Promise.all([getInventory(), getMovements({ pageSize: 1000 })]);
+      const [invRes, movRes, factoryRes, factoryHistoryRes] = await Promise.all([
+        getInventory(), getMovements({ pageSize: 1000 }), getFactoryInventory(),
+        getFactoryInventoryHistory({ page: 1, pageSize: 1000 }),
+      ]);
       setData(invRes.data);
       const movList = movRes?.data?.data || [];
       setMovements(movList);
+      setFactoryItems(Array.isArray(factoryRes?.data) ? factoryRes.data : []);
+      setFactoryHistory(Array.isArray(factoryHistoryRes?.data?.data) ? factoryHistoryRes.data.data : []);
     } catch (err) {
       console.error('Failed to load inventory:', err);
     } finally {
@@ -67,6 +74,10 @@ export default function Dashboard({ onNavigate, canManage = true }) {
   );
   const sevenDayOut = sevenDayOutItems
     .reduce((sum, movement) => sum + (Number(movement.quantity) || 0), 0);
+  const activeFactoryItems = factoryItems.filter(item => (Number(item.total_quantity) || 0) > 0);
+  const factoryPendingTotal = activeFactoryItems.reduce((sum, item) => sum + (Number(item.total_quantity) || 0), 0);
+  const recentFactoryHistory = factoryHistory.filter(item => item.created_at && new Date(item.created_at) >= sevenDaysStart);
+  const recentFactoryRecorded = recentFactoryHistory.reduce((sum, item) => sum + parseFactoryQuantity(item.new_value, '本次录入：', '；当前待出货'), 0);
 
   const detailConfig = {
     'today-in': { title: '今日入库详情', subtitle: todayLabel, items: todayInItems, kind: 'movement' },
@@ -77,6 +88,12 @@ export default function Dashboard({ onNavigate, canManage = true }) {
       subtitle: `${sevenDaysStart.getMonth() + 1}月${sevenDaysStart.getDate()}日 至 ${todayLabel}`,
       items: sevenDayOutItems,
       kind: 'movement',
+    },
+    'seven-day-factory': {
+      title: '近7日工厂待出货录入',
+      subtitle: `${sevenDaysStart.getMonth() + 1}月${sevenDaysStart.getDate()}日 至 ${todayLabel}`,
+      items: recentFactoryHistory,
+      kind: 'factory',
     },
   };
 
@@ -93,6 +110,15 @@ export default function Dashboard({ onNavigate, canManage = true }) {
         <h1 className="text-xl font-bold text-gray-900">库存预览</h1>
         <p className="text-sm text-gray-500 mt-0.5">实时查看库存状态与商品信息</p>
       </div>
+
+      <section className="card overflow-hidden border-amber-100 bg-gradient-to-br from-amber-50 to-white">
+        <div className="flex items-center justify-between border-b border-amber-100 px-4 py-3"><div className="flex items-center gap-2"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-100"><Factory className="h-5 w-5 text-amber-700" /></span><div><h3 className="text-sm font-semibold text-gray-900">工厂待出货</h3><p className="text-[11px] text-gray-500">当前待出货与近期录入情况</p></div></div><button type="button" onClick={() => onNavigate('factory')} className="rounded-lg bg-white px-3 py-1.5 text-xs font-medium text-amber-700 shadow-sm hover:bg-amber-100">查看工厂库存</button></div>
+        <div className="grid grid-cols-3 divide-x divide-amber-100 p-3">
+          <div className="px-2 text-center"><p className="text-2xl font-bold text-gray-900">{activeFactoryItems.length}</p><p className="mt-1 text-xs text-gray-500">待出货商品</p></div>
+          <div className="px-2 text-center"><p className="text-2xl font-bold text-amber-700">{factoryPendingTotal}</p><p className="mt-1 text-xs text-gray-500">当前待出货量</p></div>
+          <button type="button" onClick={() => setDetailType('seven-day-factory')} className="rounded-lg px-2 text-center hover:bg-amber-100"><p className="text-2xl font-bold text-orange-600">{recentFactoryRecorded}</p><p className="mt-1 text-xs text-gray-500">近7日录入量</p></button>
+        </div>
+      </section>
 
       {/* 今日动态 */}
       <div className="card p-4">
@@ -300,6 +326,8 @@ function DashboardDetailModal({ config, onClose }) {
                 </div>
               ))}
             </div>
+          ) : config.kind === 'factory' ? (
+            <div className="divide-y divide-gray-100">{config.items.map(record => <div key={record.id} className="px-4 py-3"><div className="flex items-center gap-3"><ProductThumb src={record.product_image} name={record.product_name} /><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-gray-900">{record.product_name || '已删除商品'}</p><p className="mt-1 text-xs leading-relaxed text-gray-500">{record.new_value || '未记录数量明细'}</p></div><time className="shrink-0 text-xs text-gray-400">{formatTime(record.created_at)}</time></div>{record.note && <p className="ml-14 mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">备注：{record.note}</p>}</div>)}</div>
           ) : (
             <div className="divide-y divide-gray-100">
               {config.items.map(movement => (
@@ -325,6 +353,16 @@ function DashboardDetailModal({ config, onClose }) {
       </div>
     </div>
   );
+}
+
+function parseFactoryQuantity(value, startMarker, endMarker = '') {
+  const text = String(value || '');
+  const start = text.indexOf(startMarker);
+  if (start < 0) return 0;
+  const contentStart = start + startMarker.length;
+  const end = endMarker ? text.indexOf(endMarker, contentStart) : -1;
+  const section = text.slice(contentStart, end >= 0 ? end : undefined);
+  return [...section.matchAll(/\+(\d+)/g)].reduce((sum, match) => sum + Number(match[1] || 0), 0);
 }
 
 function ProductThumb({ src, name }) {

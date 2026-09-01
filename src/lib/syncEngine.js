@@ -133,16 +133,18 @@ export async function pullFromCloud() {
   const teamId = await getTeamId();
   if (!teamId) throw new Error('缺少团队信息，无法同步');
 
-  const [productsRes, movementsRes, tagsRes, changesRes] = await Promise.all([
+  const [productsRes, movementsRes, tagsRes, changesRes, factoryRes] = await Promise.all([
     supabase.from('products').select('*').eq('team_id', teamId).order('updated_at', { ascending: false }),
     supabase.from('stock_movements').select('*').eq('team_id', teamId).order('created_at', { ascending: false }).limit(1000),
     supabase.from('tags').select('*').eq('team_id', teamId).order('created_at', { ascending: true }),
-    supabase.from('product_changes').select('*').eq('team_id', teamId).order('created_at', { ascending: false }).limit(500),
+    supabase.from('product_changes').select('*').eq('team_id', teamId).order('created_at', { ascending: false }).limit(1000),
+    supabase.from('factory_inventory').select('*').eq('team_id', teamId).order('updated_at', { ascending: false }),
   ]);
   const products = assertResult(productsRes, '拉取商品失败').map(normalizeProduct);
   const movements = assertResult(movementsRes, '拉取流水失败');
   const tags = assertResult(tagsRes, '拉取标签失败');
   const changes = assertResult(changesRes, '拉取变更记录失败');
+  const factoryInventory = assertResult(factoryRes, '拉取工厂待出货库存失败');
 
   // replace 而不是 upsert，确保其他设备删除的数据也会从本地消失。
   await Promise.all([
@@ -150,6 +152,7 @@ export async function pullFromCloud() {
     localDb.replaceMovements(movements),
     localDb.replaceTags(tags),
     localDb.replaceProductChanges(changes),
+    localDb.replaceFactoryInventory(factoryInventory),
   ]);
   state.lastSync = new Date().toISOString();
   state.lastError = null;

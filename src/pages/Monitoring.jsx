@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Boxes, ChevronRight, Package, TrendingUp, X } from 'lucide-react';
-import { getMovements, getProducts, getSyncDiagnostics } from '../api/client';
+import { AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Boxes, ChevronRight, Factory, Package, TrendingUp, X } from 'lucide-react';
+import { getActivityRecords, getFactoryInventory, getMovements, getProducts, getSyncDiagnostics } from '../api/client';
 import useSyncRefresh from '../lib/useSyncRefresh';
 import { ProductDetailPanel } from './Products';
 
@@ -9,24 +9,38 @@ const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).pad
 const startOfDay = value => { const date = new Date(value); date.setHours(0, 0, 0, 0); return date; };
 const formatShortDate = value => new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric' }).format(new Date(value));
 const formatTime = value => value ? new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) : '从未出库';
+const parseFactoryQuantity = (value, startMarker, endMarker = '') => {
+  const text = String(value || '');
+  const start = text.indexOf(startMarker);
+  if (start < 0) return 0;
+  const contentStart = start + startMarker.length;
+  const end = endMarker ? text.indexOf(endMarker, contentStart) : -1;
+  const section = text.slice(contentStart, end >= 0 ? end : undefined);
+  return [...section.matchAll(/\+(\d+)/g)].reduce((sum, match) => sum + Number(match[1] || 0), 0);
+};
 
 export default function Monitoring() {
   const [period, setPeriod] = useState(7);
   const [products, setProducts] = useState([]);
   const [movements, setMovements] = useState([]);
   const [pending, setPending] = useState([]);
+  const [factoryItems, setFactoryItems] = useState([]);
+  const [factoryChanges, setFactoryChanges] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedDay, setSelectedDay] = useState(null);
   const [detailProduct, setDetailProduct] = useState(null);
 
   const loadData = useCallback(async () => {
     try {
-      const [productRes, movementRes, diagnostics] = await Promise.all([
+      const [productRes, movementRes, diagnostics, factoryRes, factoryChangeRes] = await Promise.all([
         getProducts(), getMovements({ pageSize: 1000 }), getSyncDiagnostics(),
+        getFactoryInventory(), getActivityRecords({ type: 'factory', pageSize: 1000 }),
       ]);
       setProducts(Array.isArray(productRes.data) ? productRes.data : []);
       setMovements(Array.isArray(movementRes?.data?.data) ? movementRes.data.data : []);
       setPending(diagnostics.pending || []);
+      setFactoryItems(Array.isArray(factoryRes?.data) ? factoryRes.data : []);
+      setFactoryChanges(Array.isArray(factoryChangeRes?.data?.data) ? factoryChangeRes.data.data : []);
     } catch (error) {
       console.error('Failed to load monitoring data:', error);
     } finally {
@@ -42,6 +56,7 @@ export default function Monitoring() {
     const periodStart = new Date(today);
     periodStart.setDate(periodStart.getDate() - period + 1);
     const recent = movements.filter(item => new Date(item.created_at) >= periodStart);
+    const recentFactoryChanges = factoryChanges.filter(item => new Date(item.created_at) >= periodStart);
     const days = Array.from({ length: period }, (_, index) => {
       const date = new Date(periodStart);
       date.setDate(date.getDate() + index);
@@ -109,16 +124,38 @@ export default function Monitoring() {
       anomalies.push({ id: `pending_${item.id}`, time: item.created_at, level: 'danger', title: '待同步操作长时间未完成', detail: `已等待 ${Math.floor((Date.now() - new Date(item.created_at).getTime()) / 60000)} 分钟` });
     }
     anomalies.sort((a, b) => new Date(b.time) - new Date(a.time));
-    return { days, totalOut, hotProducts, hotVariants, staleProducts, anomalies };
-  }, [movements, pending, period, products]);
+    const activeFactoryItems = factoryItems.filter(item => Number(item.total_quantity || 0) > 0);
+    const factoryPendingTotal = activeFactoryItems.reduce((sum, item) => sum + Number(item.total_quantity || 0), 0);
+    const factoryDays = days.map(day => {
+      const entries = recentFactoryChanges.filter(item => dateKey(new Date(item.created_at)) === day.key);
+      const recorded = entries.filter(item => item.field === '待出货库存录入')
+        .reduce((sum, item) => sum + parseFactoryQuantity(item.new_value, '本次录入：', '；当前待出货'), 0);
+      const transferred = entries.filter(item => item.field === '待出货转销售库存')
+        .reduce((sum, item) => sum + parseFactoryQuantity(item.new_value, '大货入库：'), 0);
+      return { ...day, entries, recorded, transferred };
+    });
+    const factoryRecorded = factoryDays.reduce((sum, day) => sum + day.recorded, 0);
+    const factoryTransferred = factoryDays.reduce((sum, day) => sum + day.transferred, 0);
+    const factoryRanking = activeFactoryItems.map(item => ({
+      product: item.product || productMap.get(String(item.product_id)),
+      quantity: Number(item.total_quantity || 0),
+      variantCount: (item.variants || []).filter(variant => Number(variant.quantity || 0) > 0).length,
+    })).filter(item => item.product).sort((a, b) => b.quantity - a.quantity).slice(0, 5);
+    return {
+      days, totalOut, hotProducts, hotVariants, staleProducts, anomalies,
+      factoryDays, factoryRecorded, factoryTransferred, factoryRanking,
+      factoryProductCount: activeFactoryItems.length, factoryPendingTotal,
+    };
+  }, [factoryChanges, factoryItems, movements, pending, period, products]);
 
   if (loading) return <div className="flex h-64 items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-2 border-primary-500 border-t-transparent" /></div>;
 
   const maxDaily = Math.max(1, ...metrics.days.flatMap(day => [day.incoming, day.outgoing]));
+  const maxFactoryDaily = Math.max(1, ...metrics.factoryDays.flatMap(day => [day.recorded, day.transferred]));
   return (
     <div className="space-y-5">
       <div className="flex items-start justify-between gap-3">
-        <div><h1 className="text-xl font-bold text-gray-900">数据监控</h1><p className="mt-0.5 text-sm text-gray-500">库存流动、动销排行与异常提醒</p></div>
+        <div><h1 className="text-xl font-bold text-gray-900">数据监控</h1><p className="mt-0.5 text-sm text-gray-500">销售库存、工厂待出货与异常提醒</p></div>
         <div className="flex rounded-lg bg-gray-100 p-1">
           {[7, 30].map(value => <button key={value} onClick={() => setPeriod(value)} className={`rounded-md px-3 py-1.5 text-xs font-medium ${period === value ? 'bg-white text-primary-700 shadow-sm' : 'text-gray-500'}`}>{value}日</button>)}
         </div>
@@ -148,6 +185,38 @@ export default function Monitoring() {
         <RankingCard title={`热销尺码 Top 5 · ${period}日`} items={metrics.hotVariants.map(item => ({ product: item.product, label: `${item.product.name} · ${item.size}`, sub: '尺码出库', quantity: item.quantity }))} total={metrics.totalOut} onProduct={setDetailProduct} />
       </div>
 
+      <section className="card overflow-hidden border-amber-100 p-4">
+        <SectionTitle icon={Factory} title={`工厂待出货监控 · 近 ${period} 日`} subtitle="对比待出货录入与转销售入库数量" />
+        <div className="my-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Metric label="当前待出货商品" value={metrics.factoryProductCount} tone="text-gray-900" />
+          <Metric label="当前待出货总量" value={metrics.factoryPendingTotal} tone="text-amber-700" />
+          <Metric label={`${period}日录入量`} value={metrics.factoryRecorded} tone="text-orange-600" />
+          <Metric label={`${period}日转销售量`} value={metrics.factoryTransferred} tone="text-green-600" />
+        </div>
+        <div className="mb-3 flex gap-4 text-xs text-gray-500"><Legend color="bg-amber-400" text="录入待出货" /><Legend color="bg-green-500" text="转销售入库" /></div>
+        <div className="overflow-x-auto pb-1">
+          <div className={`flex h-44 items-end gap-1 ${period === 30 ? 'min-w-[760px]' : 'min-w-full'}`}>
+            {metrics.factoryDays.map(day => (
+              <div key={day.key} className="flex h-full min-w-0 flex-1 flex-col items-center justify-end rounded-lg px-0.5">
+                <div className="flex h-32 items-end gap-0.5">
+                  <span className="w-2 rounded-t bg-amber-400" style={{ height: `${Math.max(day.recorded ? 4 : 0, day.recorded / maxFactoryDaily * 100)}%` }} />
+                  <span className="w-2 rounded-t bg-green-500" style={{ height: `${Math.max(day.transferred ? 4 : 0, day.transferred / maxFactoryDaily * 100)}%` }} />
+                </div>
+                <span className="mt-2 whitespace-nowrap text-[10px] text-gray-400">{formatShortDate(day.date)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <RankingCard
+        title="当前工厂待出货 Top 5"
+        items={metrics.factoryRanking.map(item => ({ product: item.product, label: item.product.name, sub: `${item.variantCount} 个待出货尺码`, quantity: item.quantity }))}
+        total={metrics.factoryPendingTotal}
+        onProduct={setDetailProduct}
+        emptyText="当前暂无工厂待出货库存"
+      />
+
       <section className="card overflow-hidden">
         <div className="p-4"><SectionTitle icon={Boxes} title="滞销库存监测" subtitle="30天无出库且仍有库存" /></div>
         {metrics.staleProducts.length ? <div className="divide-y divide-gray-100">{metrics.staleProducts.map(item => (
@@ -174,9 +243,10 @@ function SectionTitle({ icon: Icon, title, subtitle }) { return <div className="
 function Legend({ color, text }) { return <span className="flex items-center gap-1.5"><span className={`h-2.5 w-2.5 rounded-sm ${color}`} />{text}</span>; }
 function ProductImage({ product }) { return <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-gray-100">{product.image_path ? <img src={product.image_path} alt="" className="h-full w-full object-cover" /> : <Package className="h-5 w-5 text-gray-300" />}</div>; }
 function Empty({ text }) { return <div className="px-4 py-10 text-center text-sm text-gray-400">{text}</div>; }
+function Metric({ label, value, tone }) { return <div className="rounded-xl bg-gray-50 px-3 py-3 text-center"><p className={`text-xl font-bold ${tone}`}>{value}</p><p className="mt-1 text-[11px] text-gray-500">{label}</p></div>; }
 
-function RankingCard({ title, items, total, onProduct }) {
-  return <section className="card overflow-hidden"><div className="border-b border-gray-100 px-4 py-3"><h2 className="text-sm font-semibold text-gray-900">{title}</h2></div>{items.length ? <div className="divide-y divide-gray-100">{items.map((item, index) => { const percent = total ? Math.round(item.quantity / total * 100) : 0; return <button key={`${item.product.id}_${item.label}`} onClick={() => onProduct(item.product)} className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-gray-50"><span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${index < 3 ? 'bg-orange-50 text-orange-600' : 'bg-gray-100 text-gray-500'}`}>{index + 1}</span><ProductImage product={item.product} /><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-gray-900">{item.label}</p><div className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-100"><div className="h-full rounded-full bg-primary-500" style={{ width: `${percent}%` }} /></div></div><div className="text-right"><p className="text-sm font-semibold text-gray-900">{item.quantity}</p><p className="text-[10px] text-gray-400">{percent}%</p></div></button>; })}</div> : <Empty text="该周期暂无出库数据" />}</section>;
+function RankingCard({ title, items, total, onProduct, emptyText = '该周期暂无出库数据' }) {
+  return <section className="card overflow-hidden"><div className="border-b border-gray-100 px-4 py-3"><h2 className="text-sm font-semibold text-gray-900">{title}</h2></div>{items.length ? <div className="divide-y divide-gray-100">{items.map((item, index) => { const percent = total ? Math.round(item.quantity / total * 100) : 0; return <button key={`${item.product.id}_${item.label}`} onClick={() => onProduct(item.product)} className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-gray-50"><span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${index < 3 ? 'bg-orange-50 text-orange-600' : 'bg-gray-100 text-gray-500'}`}>{index + 1}</span><ProductImage product={item.product} /><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-gray-900">{item.label}</p>{item.sub && <p className="mt-0.5 truncate text-[11px] text-gray-400">{item.sub}</p>}<div className="mt-1 h-1.5 overflow-hidden rounded-full bg-gray-100"><div className="h-full rounded-full bg-primary-500" style={{ width: `${percent}%` }} /></div></div><div className="text-right"><p className="text-sm font-semibold text-gray-900">{item.quantity}</p><p className="text-[10px] text-gray-400">{percent}%</p></div></button>; })}</div> : <Empty text={emptyText} />}</section>;
 }
 
 function DayDetail({ day, onClose }) {

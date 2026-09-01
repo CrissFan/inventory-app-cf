@@ -888,17 +888,20 @@ const normalizeFactoryItem = row => {
 
 export const getFactoryInventory = async () => {
   if (!USE_CLOUD) return api.get('/factory-inventory');
-  const teamId = await localDb.getMeta('team_id');
-  if (!teamId) throw new Error('缺少团队信息，请重新登录');
-  const { data, error } = await supabase.from('factory_inventory')
-    .select('*, product:products(*)')
-    .eq('team_id', teamId)
-    .order('updated_at', { ascending: false });
-  if (error) {
-    if (/factory_inventory|schema cache|does not exist/i.test(error.message || '')) throw new Error('数据库待出货功能尚未部署，请先执行 factory-inventory-migration.sql');
-    throw new Error(error.message || '读取待出货库存失败');
-  }
-  return { data: (data || []).map(normalizeFactoryItem) };
+  const [items, products] = await Promise.all([
+    localDb.getAllFactoryInventory(),
+    localDb.getAllProducts(),
+  ]);
+  const productMap = new Map(products.map(product => [String(product.id), product]));
+  requestBackgroundSync();
+  return {
+    data: items
+      .map(item => normalizeFactoryItem({
+        ...item,
+        product: productMap.get(String(item.product_id)) || item.product,
+      }))
+      .sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0)),
+  };
 };
 
 export const setFactoryInventory = async (productId, variants) => {
@@ -919,6 +922,7 @@ export const setFactoryInventory = async (productId, variants) => {
     if (/set_factory_inventory|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库待出货功能尚未部署，请先执行 factory-inventory-migration.sql');
     throw new Error(error.message || '保存待出货库存失败');
   }
+  if (data?.factory) await localDb.upsertFactoryInventory(data.factory);
   if (data?.change) await localDb.upsertProductChange(data.change);
   if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
   return { data: normalizeFactoryItem({ ...data.factory, product: data.product }) };
@@ -944,6 +948,7 @@ export const addFactoryInventory = async (productId, variants, note = '') => {
     if (/add_factory_inventory|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库增量录入接口尚未部署，请重新执行 factory-inventory-migration.sql');
     throw new Error(error.message || '新增待出货库存失败');
   }
+  if (data?.factory) await localDb.upsertFactoryInventory(data.factory);
   if (data?.change) await localDb.upsertProductChange(data.change);
   if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
   return { data: normalizeFactoryItem({ ...data.factory, product: data.product }) };
@@ -968,6 +973,7 @@ export const transferFactoryInventory = async (productId, variants, operator = '
     throw new Error(error.message || '待出货商品入库失败');
   }
   if (data?.product) await localDb.upsertProduct(normalizeProduct(data.product));
+  if (data?.factory) await localDb.upsertFactoryInventory(data.factory);
   for (const movement of data?.movements || []) await localDb.upsertMovement(movement);
   if (data?.change) await localDb.upsertProductChange(data.change);
   if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
