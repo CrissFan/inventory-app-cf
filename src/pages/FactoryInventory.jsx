@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowDownToLine, Boxes, Calculator, CheckCircle2, ClipboardList, Factory, LoaderCircle, Package, Pencil, Plus, Search, X } from 'lucide-react';
+import { ArrowDownToLine, Boxes, Calculator, CheckCircle2, ClipboardList, Download, Factory, LoaderCircle, Package, Pencil, Plus, Search, X } from 'lucide-react';
 import { addFactoryInventory, getFactoryInventory, getFactoryInventoryHistory, getProducts, setFactoryInventory, transferFactoryInventory } from '../api/client';
 import { useAuth } from '../AuthContext';
 import ProductTagBadges from '../components/ProductTagBadges';
@@ -73,7 +73,7 @@ export default function FactoryInventory() {
 
       {showEditor && <FactoryInventoryEditor products={products} items={items} initialItem={editorItem} onClose={() => { setShowEditor(false); setEditorItem(null); }} onSaved={handleSaved} />}
       {showHistory && <FactoryInventoryHistory onClose={() => setShowHistory(false)} />}
-      {showCalculator && <ReplenishmentCalculator products={products} items={items} onClose={() => setShowCalculator(false)} />}
+      {showCalculator && <ReplenishmentCalculator products={products} items={items} operator={user?.display_name || user?.username || '未记录'} onClose={() => setShowCalculator(false)} />}
       {transferItem && <FactoryTransferModal item={transferItem} operator={user?.display_name || ''} onClose={() => setTransferItem(null)} onTransferred={handleTransferred} />}
     </div>
   );
@@ -130,10 +130,12 @@ function FactoryInventoryHistory({ onClose }) {
   </div>;
 }
 
-function ReplenishmentCalculator({ products, items, onClose }) {
+function ReplenishmentCalculator({ products, items, operator, onClose }) {
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [search, setSearch] = useState('');
   const [orders, setOrders] = useState({});
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
 
   const candidates = useMemo(() => {
     const keyword = search.trim().toLocaleLowerCase('zh-CN');
@@ -171,6 +173,151 @@ function ReplenishmentCalculator({ products, items, onClose }) {
     suggested: result.suggested + row.suggested,
   }), { order: 0, sales: 0, factory: 0, suggested: 0 }), [rows]);
 
+  const downloadImage = async () => {
+    if (!selectedProduct || exporting) return;
+    setExporting(true);
+    setExportError('');
+    try {
+      const generatedAt = new Date();
+      const width = 1200;
+      const rowHeight = 76;
+      const height = 625 + rows.length * rowHeight;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('当前浏览器不支持生成图片');
+      const fontFamily = '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif';
+
+      const roundedRect = (x, y, w, h, radius, color) => {
+        const r = Math.min(radius, w / 2, h / 2);
+        context.beginPath();
+        context.moveTo(x + r, y);
+        context.lineTo(x + w - r, y);
+        context.quadraticCurveTo(x + w, y, x + w, y + r);
+        context.lineTo(x + w, y + h - r);
+        context.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        context.lineTo(x + r, y + h);
+        context.quadraticCurveTo(x, y + h, x, y + h - r);
+        context.lineTo(x, y + r);
+        context.quadraticCurveTo(x, y, x + r, y);
+        context.closePath();
+        context.fillStyle = color;
+        context.fill();
+      };
+      const fitText = (value, maxWidth) => {
+        const original = String(value || '');
+        if (context.measureText(original).width <= maxWidth) return original;
+        let shortened = original;
+        while (shortened.length > 1 && context.measureText(`${shortened}…`).width > maxWidth) shortened = shortened.slice(0, -1);
+        return `${shortened}…`;
+      };
+
+      context.fillStyle = '#f8fafc';
+      context.fillRect(0, 0, width, height);
+      roundedRect(42, 38, width - 84, height - 76, 28, '#ffffff');
+      context.fillStyle = '#111827';
+      context.font = `700 42px ${fontFamily}`;
+      context.fillText('工厂待出货 · 补货计算单', 78, 104);
+      context.fillStyle = '#6b7280';
+      context.font = `400 22px ${fontFamily}`;
+      context.fillText(`生成时间：${generatedAt.toLocaleString('zh-CN', { hour12: false })}`, 78, 148);
+      context.textAlign = 'right';
+      context.fillText(`操作人：${operator || '未记录'}`, width - 78, 148);
+      context.textAlign = 'left';
+      context.strokeStyle = '#e5e7eb';
+      context.lineWidth = 2;
+      context.beginPath(); context.moveTo(78, 174); context.lineTo(width - 78, 174); context.stroke();
+
+      context.fillStyle = '#9ca3af';
+      context.font = `500 20px ${fontFamily}`;
+      context.fillText('商品名称', 78, 215);
+      context.fillStyle = '#111827';
+      context.font = `700 34px ${fontFamily}`;
+      context.fillText(fitText(selectedProduct.name, width - 156), 78, 258);
+
+      const summaryCards = [
+        { label: '商品订单数量', value: totals.order, bg: '#f3f4f6', color: '#111827' },
+        { label: '当前库存数量', value: totals.sales, bg: '#eff6ff', color: '#2563eb' },
+        { label: '工厂待出货数量', value: totals.factory, bg: '#fffbeb', color: '#d97706' },
+        { label: '建议补货数量', value: totals.suggested, bg: '#fef2f2', color: '#dc2626' },
+      ];
+      const cardGap = 18;
+      const cardWidth = (width - 156 - cardGap * 3) / 4;
+      summaryCards.forEach((card, index) => {
+        const x = 78 + index * (cardWidth + cardGap);
+        roundedRect(x, 292, cardWidth, 112, 16, card.bg);
+        context.fillStyle = '#6b7280';
+        context.font = `500 18px ${fontFamily}`;
+        context.fillText(card.label, x + 20, 326);
+        context.fillStyle = card.color;
+        context.font = `700 36px ${fontFamily}`;
+        context.fillText(String(card.value), x + 20, 379);
+      });
+
+      const columns = [
+        { label: '尺码', x: 100, align: 'left' },
+        { label: '订单数量', x: 430, align: 'center' },
+        { label: '当前库存', x: 640, align: 'center' },
+        { label: '待出货', x: 840, align: 'center' },
+        { label: '建议补货', x: 1050, align: 'center' },
+      ];
+      roundedRect(78, 442, width - 156, 58, 12, '#f3f4f6');
+      context.fillStyle = '#4b5563';
+      context.font = `600 20px ${fontFamily}`;
+      columns.forEach(column => {
+        context.textAlign = column.align;
+        context.fillText(column.label, column.x, 479);
+      });
+
+      rows.forEach((row, index) => {
+        const y = 500 + index * rowHeight;
+        if (index % 2 === 1) {
+          context.fillStyle = '#f9fafb';
+          context.fillRect(78, y, width - 156, rowHeight);
+        }
+        context.strokeStyle = '#eef0f3';
+        context.beginPath(); context.moveTo(78, y + rowHeight); context.lineTo(width - 78, y + rowHeight); context.stroke();
+        context.font = `500 21px ${fontFamily}`;
+        context.fillStyle = '#1f2937';
+        context.textAlign = 'left';
+        context.fillText(fitText(row.size || '未命名尺码', 250), 100, y + 47);
+        const values = [row.orderQuantity, row.salesStock, row.factoryStock, row.suggested];
+        [430, 640, 840, 1050].forEach((x, valueIndex) => {
+          context.textAlign = 'center';
+          context.fillStyle = valueIndex === 3 && row.suggested > 0 ? '#dc2626' : '#374151';
+          context.font = `${valueIndex === 3 ? 700 : 500} 22px ${fontFamily}`;
+          context.fillText(String(values[valueIndex]), x, y + 47);
+        });
+      });
+
+      const footerY = 540 + rows.length * rowHeight;
+      context.textAlign = 'left';
+      context.fillStyle = '#9ca3af';
+      context.font = `400 18px ${fontFamily}`;
+      context.fillText('计算公式：建议补货 = max(0，订单数量 − 当前库存 − 工厂待出货数量)', 78, footerY);
+      context.textAlign = 'right';
+      context.fillText('由库存管理系统生成', width - 78, footerY);
+
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png', 1));
+      if (!blob) throw new Error('图片生成失败，请重试');
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const dateKey = `${generatedAt.getFullYear()}${String(generatedAt.getMonth() + 1).padStart(2, '0')}${String(generatedAt.getDate()).padStart(2, '0')}_${String(generatedAt.getHours()).padStart(2, '0')}${String(generatedAt.getMinutes()).padStart(2, '0')}`;
+      const safeName = String(selectedProduct.name || '商品').replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
+      link.href = url;
+      link.download = `补货计算_${safeName}_${dateKey}.png`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
+    } catch (error) {
+      setExportError(error.message || '图片生成失败');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return <div className="fixed inset-0 z-[85] flex flex-col bg-gray-50">
     <header className="flex shrink-0 items-center gap-3 border-b border-gray-100 bg-white px-4 py-3" style={{ paddingTop: 'max(12px, env(safe-area-inset-top))' }}>
       <button type="button" onClick={onClose} className="rounded-lg p-1.5 hover:bg-gray-100"><X className="h-5 w-5 text-gray-500" /></button>
@@ -178,6 +325,7 @@ function ReplenishmentCalculator({ products, items, onClose }) {
     </header>
     <main className="flex-1 overflow-y-auto p-4">
       <div className="mx-auto max-w-3xl space-y-4 pb-6">
+        {exportError && <div className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-600">{exportError}</div>}
         {!selectedProduct ? <>
           <div className="relative"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" /><input className="input pl-9" placeholder="搜索并选择需要计算的商品" value={search} onChange={event => setSearch(event.target.value)} autoFocus /></div>
           <div className="card divide-y divide-gray-100">
@@ -210,7 +358,7 @@ function ReplenishmentCalculator({ products, items, onClose }) {
         </>}
       </div>
     </main>
-    <footer className="shrink-0 border-t border-gray-200 bg-white px-4 py-3" style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}><div className="mx-auto flex max-w-3xl justify-end"><button type="button" onClick={onClose} className="btn-primary min-w-28">完成</button></div></footer>
+    <footer className="shrink-0 border-t border-gray-200 bg-white px-4 py-3" style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}><div className="mx-auto flex max-w-3xl justify-end gap-3">{selectedProduct && <button type="button" disabled={exporting} onClick={downloadImage} className="btn-secondary"><Download className="h-4 w-4" />{exporting ? '生成中' : '生成并下载图片'}</button>}<button type="button" onClick={onClose} className="btn-primary min-w-28">完成</button></div></footer>
   </div>;
 }
 
