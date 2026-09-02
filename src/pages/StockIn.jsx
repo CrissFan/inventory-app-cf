@@ -33,6 +33,7 @@ export default function StockIn({ initialSelection = null }) {
   const [submitting, setSubmitting] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [showBatchStockIn, setShowBatchStockIn] = useState(false);
+  const [batchProduct, setBatchProduct] = useState(null);
   const [success, setSuccess] = useState(null);
   const initialSelectionRef = useRef(initialSelection);
   const initialSelectionAppliedRef = useRef(false);
@@ -149,8 +150,8 @@ export default function StockIn({ initialSelection = null }) {
     return <BarcodeScanner onScan={handleScan} onClose={() => setShowScanner(false)} />;
   }
 
-  if (showBatchStockIn) {
-    return <BatchStockIn onClose={() => setShowBatchStockIn(false)} onCompleted={loadData} />;
+  if (showBatchStockIn || batchProduct) {
+    return <BatchStockIn product={batchProduct} onClose={() => { setShowBatchStockIn(false); setBatchProduct(null); }} onCompleted={loadData} />;
   }
 
   if (success) {
@@ -208,6 +209,12 @@ export default function StockIn({ initialSelection = null }) {
               <ProductTagBadges product={selected} className="mt-1.5" />
             </div>
             <div className="flex items-center gap-1">
+              {!variantLocked && selected.variants?.length > 1 && (
+                <button type="button" onClick={() => setBatchProduct(selected)} className="flex items-center gap-1 rounded-lg px-2.5 py-2 text-xs font-medium text-green-700 hover:bg-green-50" title="一次录入多个尺码">
+                  <ListPlus className="h-4 w-4" />
+                  批量入库
+                </button>
+              )}
               <button onClick={() => setShowScanner(true)} className="p-2 hover:bg-gray-100 rounded-lg" title="扫码切换">
                 <ScanLine className="w-4 h-4 text-gray-500" />
               </button>
