@@ -223,6 +223,11 @@ export async function upsertProductChange(change) {
   await db.put('product_changes', record);
 }
 
+export async function deleteProductChange(id) {
+  const db = await getDb();
+  await db.delete('product_changes', id);
+}
+
 // 按商品 ID 查询变更记录（本地）
 export async function getProductChanges(productId) {
   const db = await getDb();
@@ -256,6 +261,11 @@ export async function upsertFactoryInventory(item) {
   if (!item?.id) return;
   const db = await getDb();
   await db.put('factory_inventory', item);
+}
+
+export async function deleteFactoryInventory(id) {
+  const db = await getDb();
+  await db.delete('factory_inventory', id);
 }
 
 export async function replaceFactoryInventory(items) {

@@ -71,7 +71,7 @@ export default function StockIn({ initialSelection = null }) {
     const timer = setTimeout(loadData, 300);
     return () => clearTimeout(timer);
   }, [loadData]);
-  useSyncRefresh(loadData);
+  useSyncRefresh(loadData, ['products']);
 
   const loadTags = useCallback(async () => {
     try {
@@ -80,7 +80,7 @@ export default function StockIn({ initialSelection = null }) {
     } catch {}
   }, []);
   useEffect(() => { loadTags(); }, [loadTags]);
-  useSyncRefresh(loadTags);
+  useSyncRefresh(loadTags, ['tags']);
 
   const displayProducts = products.filter(product => matchesProductTagFilters(product, categoryFilter, subFilter, subFilterRelation));
 
@@ -110,13 +110,15 @@ export default function StockIn({ initialSelection = null }) {
         currentStock: res?.data?.product?.variants?.find(v => v.id === selectedVariant.id)?.current_stock
           ?? ((selectedVariant.current_stock || 0) + parseInt(quantity)),
       });
+      if (res?.data?.product) {
+        setProducts(current => current.map(product => product.id === res.data.product.id ? res.data.product : product));
+      }
       setSelected(null);
       setSelectedVariant(null);
       setVariantLocked(false);
       setVariantLockLabel('尺码已锁定');
       setQuantity(1);
       setReason('退换货入库');
-      loadData();
     } catch (err) {
       alert('入库失败: ' + (err.response?.data?.error || err.message));
     } finally {

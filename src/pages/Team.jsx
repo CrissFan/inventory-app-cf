@@ -30,6 +30,7 @@ export default function Team() {
   const [newPassword, setNewPassword] = useState('');
   const [newDisplayName, setNewDisplayName] = useState('');
   const [newRole, setNewRole] = useState('member');
+  const [addingMember, setAddingMember] = useState(false);
 
   // Edit member
   const [editId, setEditId] = useState(null);
@@ -65,14 +66,17 @@ export default function Team() {
     e.preventDefault();
     setError('');
     setSuccess('');
+    setAddingMember(true);
     try {
-      await addMember({ username: newUsername, password: newPassword, display_name: newDisplayName, role: newRole });
+      const result = await addMember({ username: newUsername, password: newPassword, display_name: newDisplayName, role: newRole });
+      if (result.member) setMembers(current => [...current, result.member]);
       setNewUsername(''); setNewPassword(''); setNewDisplayName(''); setNewRole('member');
       setShowAdd(false);
       setSuccess('成员添加成功');
-      loadTeam();
     } catch (err) {
       setError(err.message || '添加失败');
+    } finally {
+      setAddingMember(false);
     }
   };
 
@@ -81,8 +85,8 @@ export default function Team() {
     setError('');
     try {
       await removeMember(id);
+      setMembers(current => current.filter(member => member.id !== id));
       setSuccess('成员已移除');
-      loadTeam();
     } catch (err) {
       setError(err.message || '移除失败');
     }
@@ -99,11 +103,11 @@ export default function Team() {
         setEditId(null);
         return;
       }
-      await updateMember(member.id, updates);
+      const result = await updateMember(member.id, updates);
+      if (result.member) setMembers(current => current.map(item => item.id === member.id ? result.member : item));
       setEditId(null);
       setEditPwd('');
       setSuccess('成员信息已更新');
-      loadTeam();
     } catch (err) {
       setError(err.message || '更新失败');
     }
@@ -114,9 +118,9 @@ export default function Team() {
     setError('');
     try {
       await updateTeamName(newTeamName);
+      setTeam(current => ({ ...current, name: newTeamName }));
       setEditingTeamName(false);
       setSuccess('团队名称已更新');
-      loadTeam();
     } catch (err) {
       setError(err.message || '更新失败');
     }
@@ -291,8 +295,8 @@ export default function Team() {
               </select>
             </div>
             <div className="flex gap-2 mt-3">
-              <button type="submit" className="px-4 py-1.5 bg-primary-600 text-white text-xs rounded-lg hover:bg-primary-700">
-                确认添加
+              <button type="submit" disabled={addingMember} className="px-4 py-1.5 bg-primary-600 text-white text-xs rounded-lg hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-60">
+                {addingMember ? '正在添加…' : '确认添加'}
               </button>
               <button
                 type="button"

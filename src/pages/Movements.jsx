@@ -32,7 +32,7 @@ export default function Movements() {
   }, [page, filter, debouncedSearch]);
 
   useEffect(() => { loadData(); }, [loadData]);
-  useSyncRefresh(loadData);
+  useSyncRefresh(loadData, ['stock_movements', 'product_changes']);
   useEffect(() => {
     const timer = setTimeout(() => {
       setPage(1);

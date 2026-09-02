@@ -31,7 +31,7 @@ export default function Dashboard({ onNavigate, canManage = true }) {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
-  useSyncRefresh(loadData);
+  useSyncRefresh(loadData, ['products', 'stock_movements', 'product_changes', 'factory_inventory']);
 
   useEffect(() => {
     if (!detailType && !showLowStockDetails) return undefined;

@@ -7,12 +7,12 @@
  */
 
 import axios from 'axios';
-import { getSupabase, isSupabaseAvailable } from '../lib/supabase';
+import { createEphemeralSupabase, getSupabase, isSupabaseAvailable } from '../lib/supabase';
 import * as localDb from '../lib/localDb';
 import {
   triggerSync, pushToCloud, pullFromCloud, initSync, stopSync,
   getSyncStatus, resetAndPull, resolveCloudContext, operationId, queueForSync,
-  requestBackgroundSync,
+  requestBackgroundSync, markLocalRealtimeEcho, blockBackgroundSync,
 } from '../lib/syncEngine';
 
 // =============== 模式检测 ===============
@@ -78,6 +78,12 @@ function now() {
   return new Date().toISOString();
 }
 
+function emitSyncData(tables) {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('sync:data', { detail: { tables, source: 'local-write' } }));
+  }
+}
+
 function assertCanWrite() {
   if (getSavedUser()?.role === 'viewer') {
     throw new Error('查看者仅可浏览，不能执行此操作');
@@ -104,6 +110,7 @@ async function writeWithSync(table, action, data, localId) {
   // 云端优先：在线时直接写 Supabase，成功后再把云端真实 ID 同步到本地（避免本地/云端双写重复）
   if (USE_CLOUD && navigator.onLine !== false) {
     const teamId = await localDb.getMeta('team_id');
+    blockBackgroundSync();
     try {
       switch (action) {
         case 'insert': {
@@ -320,25 +327,23 @@ export const logout = () => {
 export const getTeam = async () => {
   if (USE_CLOUD) {
     const user = getSavedUser();
-    if (user?.id) {
-      const { data: member } = await supabase.from('team_members')
-        .select('team:team_id(*), role')
-        .eq('user_id', user.id).single();
-      if (member?.team) {
-        const { data: members } = await supabase.from('team_members')
-          .select('id, user_id, display_name, role, created_at')
-          .eq('team_id', member.team.id);
-        const team = { ...member.team };
-        // 邀请码缺失时自动补全（仅管理员可更新）
-        if (!team.invite_code && member.role === 'admin') {
-          const code = `INV_${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-          const { error } = await supabase.from('teams').update({ invite_code: code }).eq('id', team.id);
-          if (!error) team.invite_code = code;
-        }
-        return { team, members: members || [], myRole: member.role };
-      }
+    const teamId = await localDb.getMeta('team_id');
+    if (!user?.id || !teamId) return { team: null, members: [], myRole: null };
+    const [teamResult, membersResult] = await Promise.all([
+      supabase.from('teams').select('*').eq('id', teamId).single(),
+      supabase.from('team_members').select('id, user_id, display_name, role, created_at').eq('team_id', teamId),
+    ]);
+    if (teamResult.error) throw new Error(teamResult.error.message || '读取团队失败');
+    if (membersResult.error) throw new Error(membersResult.error.message || '读取成员失败');
+    const team = { ...teamResult.data };
+    const myRole = membersResult.data?.find(member => member.user_id === user.id)?.role || user.role || null;
+    // 邀请码缺失时自动补全（仅管理员可更新）
+    if (!team.invite_code && myRole === 'admin') {
+      const code = `INV_${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      const { error } = await supabase.from('teams').update({ invite_code: code }).eq('id', team.id);
+      if (!error) team.invite_code = code;
     }
-    return { team: null, members: [], myRole: null };
+    return { team, members: membersResult.data || [], myRole };
   }
   return (await api.get('/team')).data;
 };
@@ -347,31 +352,26 @@ export const addMember = async (data) => {
   if (USE_CLOUD) {
     const teamId = await localDb.getMeta('team_id');
     if (!teamId) throw new Error('未找到团队信息');
-    // 记录当前管理员会话，用于创建成员后恢复
-    const { data: currentSession } = await supabase.auth.getSession();
-    // 创建新 Auth 用户（会切换会话）
-    const { data: authData, error: authError } = await supabase.auth.signUp({
+    // 独立临时客户端注册成员，不再切换并恢复当前管理员会话。
+    const signupClient = createEphemeralSupabase();
+    const { data: authData, error: authError } = await signupClient.auth.signUp({
       email: `${data.username}@inventory.local`,
       password: data.password,
       options: { data: { display_name: data.display_name || data.username } },
     });
-    // 恢复管理员会话，确保后续 RLS 写入以管理员身份进行
-    if (currentSession?.session) {
-      try { await supabase.auth.setSession(currentSession.session); } catch {}
-    }
     if (authError || !authData?.user) {
       throw new Error(authError?.message || '创建成员失败');
     }
     // 加入团队
-    const { error } = await supabase.from('team_members').insert([{
+    const { data: member, error } = await supabase.from('team_members').insert([{
       team_id: teamId,
       user_id: authData.user.id,
       display_name: data.display_name || data.username,
       role: data.role || 'member',
       created_at: now(),
-    }]);
+    }]).select('id, user_id, display_name, role, created_at').single();
     if (error) throw new Error(error.message || '添加成员失败');
-    return { ok: true };
+    return { ok: true, member };
   }
   const res = await api.post('/team/members', data);
   return res.data;
@@ -384,10 +384,11 @@ export const updateMember = async (id, data) => {
     const updates = {};
     if (data.display_name != null) updates.display_name = data.display_name;
     if (data.role) updates.role = data.role;
-    const { error } = await supabase.from('team_members')
-      .update(updates).eq('id', id).eq('team_id', teamId);
+    const { data: member, error } = await supabase.from('team_members')
+      .update(updates).eq('id', id).eq('team_id', teamId)
+      .select('id, user_id, display_name, role, created_at').single();
     if (error) throw new Error(error.message || '更新失败');
-    return { ok: true };
+    return { ok: true, member };
   }
   const res = await api.put(`/team/members/${id}`, data);
   return res.data;
@@ -400,7 +401,7 @@ export const removeMember = async (id) => {
     const { error } = await supabase.from('team_members')
       .delete().eq('id', id).eq('team_id', teamId);
     if (error) throw new Error(error.message || '移除失败');
-    return { ok: true };
+    return { ok: true, id };
   }
   const res = await api.delete(`/team/members/${id}`);
   return res.data;
@@ -607,6 +608,7 @@ export const batchCreateProducts = async (products) => {
   if (!Array.isArray(products) || !products.length) throw new Error('请至少选择一个商品');
   if (!USE_CLOUD) return api.post('/products/batch', { products });
   if (navigator.onLine === false) throw new Error('批量创建需要连接云端，请联网后重试');
+  blockBackgroundSync();
 
   const payload = products.map(product => ({
     name: String(product.name || '').trim(),
@@ -637,8 +639,7 @@ export const batchCreateProducts = async (products) => {
     created.length ? localDb.upsertProducts(created) : Promise.resolve(),
     returnedTags.length ? localDb.replaceTags(returnedTags) : Promise.resolve(),
   ]);
-  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
-  requestBackgroundSync();
+  emitSyncData(['products', 'tags']);
   return { data: { ...data, products: created } };
 };
 
@@ -730,6 +731,7 @@ export const batchDeleteProducts = async (ids) => {
   }
   const uniqueCloudIds = [...new Set(cloudIds)];
   if (uniqueCloudIds.length && navigator.onLine === false) throw new Error('所选商品包含云端数据，批量删除需要联网后执行');
+  if (uniqueCloudIds.length) blockBackgroundSync();
 
   let cloudResult = { deleted_count: 0, product_ids: [] };
   if (uniqueCloudIds.length) {
@@ -755,7 +757,6 @@ export const batchDeleteProducts = async (ids) => {
     }
   }
   if (idMapChanged) await localDb.setMeta('cloud_id_map', idMap);
-  requestBackgroundSync();
   return { data: {
     ...cloudResult,
     deleted_count: Number(cloudResult.deleted_count || 0) + localOnlyIds.length,
@@ -815,6 +816,8 @@ async function changeStock(type, data) {
   };
 
   if (navigator.onLine !== false) {
+    blockBackgroundSync();
+    markLocalRealtimeEcho('stock_movements', 'client_operation_id', clientOperationId);
     const result = await supabase.rpc('apply_variant_stock_movement', {
       p_product_id: Number(data.product_id),
       p_variant_id: data.variant_id,
@@ -913,6 +916,7 @@ export const setFactoryInventory = async (productId, variants) => {
   if (!clean.length) throw new Error('商品至少需要一个尺码');
   if (!USE_CLOUD) return api.put(`/factory-inventory/${productId}`, { variants: clean });
   if (navigator.onLine === false) throw new Error('待出货库存录入需要连接云端，请联网后重试');
+  blockBackgroundSync();
   const { data, error } = await supabase.rpc('set_factory_inventory', {
     p_product_id: Number(productId),
     p_variant_ids: clean.map(variant => variant.id),
@@ -924,7 +928,7 @@ export const setFactoryInventory = async (productId, variants) => {
   }
   if (data?.factory) await localDb.upsertFactoryInventory(data.factory);
   if (data?.change) await localDb.upsertProductChange(data.change);
-  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
+  emitSyncData(['factory_inventory', 'product_changes']);
   return { data: normalizeFactoryItem({ ...data.factory, product: data.product }) };
 };
 
@@ -938,6 +942,7 @@ export const addFactoryInventory = async (productId, variants, note = '') => {
   const cleanNote = String(note || '').trim().slice(0, 500);
   if (!USE_CLOUD) return api.put(`/factory-inventory/${productId}`, { variants: clean, mode: 'add', note: cleanNote });
   if (navigator.onLine === false) throw new Error('待出货库存录入需要连接云端，请联网后重试');
+  blockBackgroundSync();
   const { data, error } = await supabase.rpc('add_factory_inventory', {
     p_product_id: Number(productId),
     p_variant_ids: clean.map(variant => variant.id),
@@ -950,7 +955,7 @@ export const addFactoryInventory = async (productId, variants, note = '') => {
   }
   if (data?.factory) await localDb.upsertFactoryInventory(data.factory);
   if (data?.change) await localDb.upsertProductChange(data.change);
-  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
+  emitSyncData(['factory_inventory', 'product_changes']);
   return { data: normalizeFactoryItem({ ...data.factory, product: data.product }) };
 };
 
@@ -961,12 +966,15 @@ export const transferFactoryInventory = async (productId, variants, operator = '
   if (!clean.length) throw new Error('请至少填写一个尺码的入库数量');
   if (!USE_CLOUD) return api.post(`/factory-inventory/${productId}/transfer`, { variants: clean, operator });
   if (navigator.onLine === false) throw new Error('待出货转仓库需要连接云端，请联网后重试');
+  const clientOperationId = operationId('factory_transfer');
+  blockBackgroundSync();
+  clean.forEach((_, index) => markLocalRealtimeEcho('stock_movements', 'client_operation_id', `${clientOperationId}_${index + 1}`));
   const { data, error } = await supabase.rpc('transfer_factory_inventory', {
     p_product_id: Number(productId),
     p_variant_ids: clean.map(variant => variant.id),
     p_quantities: clean.map(variant => variant.quantity),
     p_operator: operator || '',
-    p_client_operation_id: operationId('factory_transfer'),
+    p_client_operation_id: clientOperationId,
   });
   if (error) {
     if (/transfer_factory_inventory|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库待出货功能尚未部署，请先执行 factory-inventory-migration.sql');
@@ -976,8 +984,7 @@ export const transferFactoryInventory = async (productId, variants, operator = '
   if (data?.factory) await localDb.upsertFactoryInventory(data.factory);
   for (const movement of data?.movements || []) await localDb.upsertMovement(movement);
   if (data?.change) await localDb.upsertProductChange(data.change);
-  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
-  requestBackgroundSync();
+  emitSyncData(['products', 'stock_movements', 'factory_inventory', 'product_changes']);
   return { data: {
     ...data,
     product: data?.product ? normalizeProduct(data.product) : null,
@@ -1013,6 +1020,10 @@ export const batchStockIn = async (items) => {
     return { data: { success: true, count: results.length, results, queued: true } };
   }
 
+  movements.forEach(item => {
+    markLocalRealtimeEcho('stock_movements', 'client_operation_id', item.client_operation_id);
+  });
+
   const { data, error } = await supabase.rpc('apply_variant_stock_in_batch', {
     p_product_ids: movements.map(item => Number(item.product_id)),
     p_variant_ids: movements.map(item => item.variant_id),
@@ -1032,8 +1043,7 @@ export const batchStockIn = async (items) => {
     if (result?.product) await localDb.upsertProduct(normalizeProduct(result.product));
     if (result?.movement) await localDb.upsertMovement(result.movement);
   }
-  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
-  requestBackgroundSync();
+  emitSyncData(['products', 'stock_movements']);
   return { data: { ...data, success: true } };
 };
 

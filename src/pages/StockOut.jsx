@@ -54,7 +54,7 @@ export default function StockOut() {
     const timer = setTimeout(loadData, 300);
     return () => clearTimeout(timer);
   }, [loadData]);
-  useSyncRefresh(loadData);
+  useSyncRefresh(loadData, ['products']);
 
   const loadTags = useCallback(async () => {
     try {
@@ -63,7 +63,7 @@ export default function StockOut() {
     } catch {}
   }, []);
   useEffect(() => { loadTags(); }, [loadTags]);
-  useSyncRefresh(loadTags);
+  useSyncRefresh(loadTags, ['tags']);
 
   const displayProducts = products.filter(product => matchesProductTagFilters(product, categoryFilter, subFilter, subFilterRelation));
 
@@ -97,12 +97,14 @@ export default function StockOut() {
         currentStock: res?.data?.product?.variants?.find(v => v.id === selectedVariant.id)?.current_stock
           ?? Math.max(0, (selectedVariant.current_stock || 0) - parseInt(quantity)),
       });
+      if (res?.data?.product) {
+        setProducts(current => current.map(product => product.id === res.data.product.id ? res.data.product : product));
+      }
       setSelected(null);
       setSelectedVariant(null);
       setVariantLocked(false);
       setQuantity(1);
       setReason('发货');
-      loadData();
     } catch (err) {
       alert('出库失败: ' + (err.response?.data?.error || err.message));
     } finally {

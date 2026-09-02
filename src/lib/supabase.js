@@ -34,4 +34,16 @@ export function isSupabaseAvailable() {
   return isConfigured && supabase !== null;
 }
 
+// 创建成员时使用独立的临时 Auth 客户端，避免 signUp 切换当前管理员会话。
+export function createEphemeralSupabase() {
+  if (!isConfigured) return null;
+  return createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+      detectSessionInUrl: false,
+    },
+  });
+}
+
 export { supabase };

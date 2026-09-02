@@ -73,7 +73,7 @@ export default function Products() {
     const timer = setTimeout(loadData, 300);
     return () => clearTimeout(timer);
   }, [loadData]);
-  useSyncRefresh(loadData);
+  useSyncRefresh(loadData, ['products']);
 
   // 加载标签层级，用于一/二级分类筛选
   const loadTags = useCallback(async () => {
@@ -83,7 +83,7 @@ export default function Products() {
     } catch {}
   }, []);
   useEffect(() => { loadTags(); }, [loadTags]);
-  useSyncRefresh(loadTags);
+  useSyncRefresh(loadTags, ['tags']);
 
   useEffect(() => {
     const handleOutside = (event) => {

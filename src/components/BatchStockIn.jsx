@@ -51,7 +51,7 @@ export default function BatchStockIn({ onClose, onCompleted }) {
   }, []);
 
   useEffect(() => { loadProducts(); }, [loadProducts]);
-  useSyncRefresh(loadProducts);
+  useSyncRefresh(loadProducts, ['products']);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;

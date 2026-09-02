@@ -39,7 +39,7 @@ export default function ProductChangesViewer({ product, onClose }) {
   }, [product.id]);
 
   useEffect(() => { loadChanges(); }, [loadChanges]);
-  useSyncRefresh(loadChanges);
+  useSyncRefresh(loadChanges, ['product_changes']);
 
   const formatDate = (dateStr) => {
     const d = new Date(dateStr);

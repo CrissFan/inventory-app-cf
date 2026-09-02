@@ -49,7 +49,7 @@ export default function Monitoring() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
-  useSyncRefresh(loadData);
+  useSyncRefresh(loadData, ['products', 'stock_movements', 'product_changes', 'factory_inventory']);
 
   const metrics = useMemo(() => {
     const today = startOfDay(new Date());

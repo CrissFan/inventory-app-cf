@@ -32,7 +32,7 @@ export default function FactoryInventory() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
-  useSyncRefresh(loadData);
+  useSyncRefresh(loadData, ['products', 'factory_inventory']);
 
   const activeItems = useMemo(() => items.filter(item => item.total_quantity > 0), [items]);
   const filteredItems = useMemo(() => {
@@ -108,7 +108,7 @@ function FactoryInventoryHistory({ onClose }) {
   }, [debouncedSearch, page]);
 
   useEffect(() => { loadHistory(); }, [loadHistory]);
-  useSyncRefresh(loadHistory);
+  useSyncRefresh(loadHistory, ['product_changes']);
 
   const formatDate = value => new Date(value).toLocaleString('zh-CN', {
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,

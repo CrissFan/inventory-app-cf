@@ -39,7 +39,7 @@ export default function Tags() {
   }, []);
 
   useEffect(() => { loadTags(); }, [loadTags]);
-  useSyncRefresh(loadTags);
+  useSyncRefresh(loadTags, ['tags']);
 
   const topTags = tags.filter(t => !t.parent_id);
   const getChildren = (id) => tags.filter(t => t.parent_id === id);

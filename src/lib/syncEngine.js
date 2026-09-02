@@ -12,6 +12,9 @@ let syncTimer = null;
 let realtimeChannel = null;
 let realtimeDebounce = null;
 let lastBackgroundRequest = 0;
+let backgroundSyncBlockedUntil = 0;
+let pendingRealtimeEvents = [];
+const recentLocalEchoes = new Map();
 
 const state = {
   lastSync: null,
@@ -29,6 +32,45 @@ function emitStatus() {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('sync:status', { detail: getSyncStatus() }));
   }
+}
+
+function emitData(tables, source = 'sync') {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('sync:data', { detail: { tables, source } }));
+  }
+}
+
+export function markLocalRealtimeEcho(table, field, value, ttl = 8000) {
+  if (value == null || value === '') return;
+  blockBackgroundSync();
+  const key = `${table}:${field}:${String(value)}`;
+  const current = recentLocalEchoes.get(key);
+  recentLocalEchoes.set(key, {
+    expiresAt: Date.now() + ttl,
+    count: (current?.count || 0) + 1,
+  });
+}
+
+export function blockBackgroundSync(ttl = 15000) {
+  backgroundSyncBlockedUntil = Math.max(backgroundSyncBlockedUntil, Date.now() + ttl);
+}
+
+function consumeLocalRealtimeEcho(table, row) {
+  const now = Date.now();
+  for (const [key, entry] of recentLocalEchoes) {
+    if (entry.expiresAt <= now) recentLocalEchoes.delete(key);
+  }
+  const keys = [
+    row?.id != null ? `${table}:id:${String(row.id)}` : null,
+    row?.product_id != null ? `${table}:product_id:${String(row.product_id)}` : null,
+    row?.client_operation_id ? `${table}:client_operation_id:${String(row.client_operation_id)}` : null,
+  ].filter(Boolean);
+  const matched = keys.find(key => recentLocalEchoes.has(key));
+  if (!matched) return false;
+  const entry = recentLocalEchoes.get(matched);
+  if (entry.count > 1) recentLocalEchoes.set(matched, { ...entry, count: entry.count - 1 });
+  else recentLocalEchoes.delete(matched);
+  return true;
 }
 
 async function refreshPendingCount() {
@@ -158,7 +200,7 @@ export async function pullFromCloud() {
   state.lastError = null;
   await localDb.setMeta('last_sync', state.lastSync);
   emitStatus();
-  if (typeof window !== 'undefined') window.dispatchEvent(new Event('sync:data'));
+  emitData(['products', 'stock_movements', 'tags', 'product_changes', 'factory_inventory'], 'full-sync');
   return true;
 }
 
@@ -386,6 +428,7 @@ async function reconcileInventory() {
   const result = await getSupabase().rpc('recalculate_team_inventory');
   // viewer/member 无权执行对账，不影响普通同步；其他错误需要暴露。
   if (result.error && !/仅管理员/.test(result.error.message || '')) throw result.error;
+  return !result.error;
 }
 
 export async function fullSync() {
@@ -410,10 +453,14 @@ export async function resetAndPull() {
   if (!isSupabaseAvailable() || !isOnline()) return false;
   // fullSync 会在上传成功后用 replace 拉取，避免未上传数据被 clearAll 删除。
   const ok = await fullSync();
-  if (ok && (await localDb.getMeta('sync_migration_version')) === 1) {
+  const teamId = await getTeamId();
+  const reconcileKey = `inventory_reconcile_version:${teamId || 'unknown'}`;
+  const needsReconcile = (await localDb.getMeta(reconcileKey)) !== 1;
+  if (ok && needsReconcile && (await localDb.getMeta('sync_migration_version')) === 1) {
     try {
-      await reconcileInventory();
-      await pullFromCloud();
+      const reconciled = await reconcileInventory();
+      await localDb.setMeta(reconcileKey, 1);
+      if (reconciled) await pullFromCloud();
     } catch (error) {
       setError(error);
     }
@@ -431,10 +478,50 @@ export function triggerSync() {
 export function requestBackgroundSync() {
   if (!isOnline() || !isSupabaseAvailable() || syncRunning) return;
   const current = Date.now();
+  if (current < backgroundSyncBlockedUntil) return;
   const lastSuccess = state.lastSync ? new Date(state.lastSync).getTime() : 0;
-  if (current - lastBackgroundRequest < 5000 || current - lastSuccess < 5000) return;
+  if (current - lastBackgroundRequest < 30000 || current - lastSuccess < 30000) return;
   lastBackgroundRequest = current;
   triggerSync();
+}
+
+async function applyRealtimeEvent(table, payload) {
+  const row = payload.eventType === 'DELETE' ? payload.old : payload.new;
+  if (!row) return false;
+  const isDelete = payload.eventType === 'DELETE';
+  if (table === 'products') {
+    if (isDelete) await localDb.deleteProductsWithRelatedData([row.id]);
+    else await localDb.upsertProduct(normalizeProduct(row));
+  } else if (table === 'tags') {
+    if (isDelete) await localDb.deleteTag(row.id);
+    else await localDb.upsertTag(row);
+  } else if (table === 'stock_movements') {
+    if (isDelete) await localDb.deleteMovement(row.id);
+    else await localDb.upsertMovement(row);
+  } else if (table === 'product_changes') {
+    if (isDelete) await localDb.deleteProductChange(row.id);
+    else await localDb.upsertProductChange(row);
+  } else if (table === 'factory_inventory') {
+    if (isDelete) await localDb.deleteFactoryInventory(row.id);
+    else await localDb.upsertFactoryInventory(row);
+  }
+  return consumeLocalRealtimeEcho(table, row);
+}
+
+async function flushRealtimeEvents() {
+  const events = pendingRealtimeEvents;
+  pendingRealtimeEvents = [];
+  const changedTables = new Set();
+  try {
+    for (const { table, payload } of events) {
+      const localEcho = await applyRealtimeEvent(table, payload);
+      if (!localEcho) changedTables.add(table);
+    }
+    if (changedTables.size) emitData([...changedTables], 'realtime');
+  } catch (error) {
+    setError(error);
+    triggerSync();
+  }
 }
 
 function subscribeRealtime(teamId) {
@@ -444,9 +531,10 @@ function subscribeRealtime(teamId) {
   for (const table of ['products', 'tags', 'stock_movements', 'product_changes', 'factory_inventory']) {
     realtimeChannel.on('postgres_changes', {
       event: '*', schema: 'public', table, filter: `team_id=eq.${teamId}`,
-    }, () => {
+    }, payload => {
+      pendingRealtimeEvents.push({ table, payload });
       clearTimeout(realtimeDebounce);
-      realtimeDebounce = setTimeout(triggerSync, 250);
+      realtimeDebounce = setTimeout(flushRealtimeEvents, 100);
     });
   }
   realtimeChannel.subscribe(status => {
@@ -483,6 +571,8 @@ export async function stopSync() {
   if (realtimeChannel && isSupabaseAvailable()) await getSupabase().removeChannel(realtimeChannel);
   syncTimer = null;
   realtimeChannel = null;
+  pendingRealtimeEvents = [];
+  recentLocalEchoes.clear();
   syncInitialized = false;
   state.realtimeStatus = 'disconnected';
 }
