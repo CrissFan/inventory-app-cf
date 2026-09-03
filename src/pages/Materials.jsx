@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Boxes, ChevronRight, CircleDollarSign, Factory, Layers3, Package, Pencil, Plus, Search, ShoppingCart, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, Boxes, Check, ChevronDown, ChevronRight, CircleDollarSign, Factory, Layers3, Package, Pencil, Plus, Search, ShoppingCart, X } from 'lucide-react';
 import { getMaterialRecords, getMaterials, getProducts, recordMaterialConsumption, recordMaterialPurchase, saveMaterial } from '../api/client';
 import { useAuth } from '../AuthContext';
 import useSyncRefresh from '../lib/useSyncRefresh';
@@ -93,15 +93,12 @@ function Modal({ title, subtitle, onClose, children, width = 'max-w-xl' }) {
 function MaterialEditor({ initial, products, onClose, onSaved }) {
   const [form, setForm] = useState({ id: initial?.id, kind: initial?.kind || 'fabric', name: initial?.name || '', contact_wechat: initial?.contact_wechat || '', model: initial?.model || '', color_code: initial?.color_code || '', unit: initial?.unit || '米', initial_stock: 0, min_stock: initial?.min_stock || 0, alert_disabled: Boolean(initial?.alert_disabled), note: initial?.note || '', links: initial?.links?.map(link => ({ product_id: String(link.product_id), part: link.part || '' })) || [] });
   const [saving, setSaving] = useState(false); const [error, setError] = useState('');
-  const [productSearch, setProductSearch] = useState('');
-  const filteredProducts = products.filter(product => !productSearch.trim() || [product.name, product.category, product.sub_tags, ...(product.variants || []).flatMap(variant => [variant.size, variant.barcode])]
-    .some(value => String(value || '').toLocaleLowerCase('zh-CN').includes(productSearch.trim().toLocaleLowerCase('zh-CN'))));
   const set = (key, value) => setForm(current => ({ ...current, [key]: value }));
   const changeKind = value => setForm(current => ({ ...current, kind: value, unit: value === 'fabric' ? '米' : (current.unit === '米' ? '个' : current.unit) }));
   const addLink = () => set('links', [...form.links, { product_id: '', part: '' }]);
   const updateLink = (index, key, value) => set('links', form.links.map((link, i) => i === index ? { ...link, [key]: value } : link));
   const submit = async event => { event.preventDefault(); if (!form.name.trim()) return setError('请填写名称'); if (form.links.some(link => !link.product_id)) return setError('请选择关联商品'); if (form.kind === 'accessory' && (!Number.isInteger(Number(form.initial_stock)) || !Number.isInteger(Number(form.min_stock)))) return setError('辅料的库存和预警值请填写整数'); setSaving(true); setError(''); try { await saveMaterial(form); await onSaved(); } catch (e) { setError(e.message || '保存失败'); } finally { setSaving(false); } };
-  return <Modal title={initial ? '编辑面辅料' : '新增面辅料'} subtitle="可关联多个商品，并分别填写使用部位" onClose={onClose}><form onSubmit={submit} className="space-y-4 p-4"><div className="grid grid-cols-2 gap-2">{[['fabric', '面料'], ['accessory', '辅料']].map(([value, label]) => <button key={value} type="button" onClick={() => changeKind(value)} className={`rounded-xl border px-3 py-2.5 text-sm font-medium ${form.kind === value ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-gray-200 text-gray-500'}`}>{label}</button>)}</div><Field label="名称 *"><input className="input" value={form.name} onChange={e => set('name', e.target.value)} placeholder={form.kind === 'fabric' ? '例如：真丝提花面料' : '例如：盘扣'} /></Field><div className="grid grid-cols-2 gap-3"><Field label="型号"><input className="input" value={form.model} onChange={e => set('model', e.target.value)} /></Field><Field label="色号"><input className="input" value={form.color_code} onChange={e => set('color_code', e.target.value)} /></Field></div><Field label="联系微信"><input className="input" value={form.contact_wechat} onChange={e => set('contact_wechat', e.target.value)} placeholder="供应商微信" /></Field><div className="grid grid-cols-2 gap-3"><Field label="库存单位"><select className="input" value={form.unit} disabled={form.kind === 'fabric'} onChange={e => set('unit', e.target.value)}>{form.kind === 'fabric' ? <option>米</option> : <><option>个</option><option>件</option></>}</select></Field>{!initial ? <Field label="初始库存"><input type="number" min="0" step="0.01" className="input" value={form.initial_stock} onChange={e => set('initial_stock', e.target.value)} /></Field> : <Field label="当前库存"><div className="input bg-gray-50 text-gray-500">{formatQuantity(initial.current_stock)} {initial.unit}</div></Field>}</div><Field label="最低库存预警"><input type="number" min="0" step="0.01" className="input" value={form.min_stock} onChange={e => set('min_stock', e.target.value)} /></Field><label className="flex items-center justify-between rounded-xl bg-gray-50 px-3 py-3"><span><span className="block text-sm font-medium text-gray-700">关闭库存预警</span><span className="text-xs text-gray-400">开启后该项库存不足时不再提醒</span></span><input type="checkbox" checked={form.alert_disabled} onChange={e => set('alert_disabled', e.target.checked)} /></label><div><div className="mb-2 flex items-center justify-between"><label className="text-sm font-medium text-gray-700">关联商品与使用部位</label><button type="button" onClick={addLink} className="text-xs font-medium text-primary-600">+ 添加关联</button></div><div className="relative mb-2"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" /><input type="search" className="input pl-9" value={productSearch} onChange={event => setProductSearch(event.target.value)} placeholder="搜索商品名称、标签、尺码或条形码" /></div><div className="space-y-2">{form.links.map((link, index) => <div key={index} className="grid grid-cols-[1fr_1fr_auto] gap-2"><select className="input" value={link.product_id} onChange={e => updateLink(index, 'product_id', e.target.value)}><option value="">选择商品</option>{filteredProducts.map(product => <option key={product.id} value={product.id}>{product.name}</option>)}</select><input className="input" value={link.part} onChange={e => updateLink(index, 'part', e.target.value)} placeholder="关联部位，如袖口" /><button type="button" onClick={() => set('links', form.links.filter((_, i) => i !== index))} className="rounded-lg px-2 text-gray-400 hover:bg-red-50 hover:text-red-500"><X className="h-4 w-4" /></button></div>)}</div></div><Field label="备注"><textarea className="input min-h-20" value={form.note} onChange={e => set('note', e.target.value)} maxLength={500} /></Field>{error && <p className="text-sm text-red-600">{error}</p>}<button type="submit" disabled={saving} className="btn-primary w-full">{saving ? '保存中…' : '保存面辅料'}</button></form></Modal>;
+  return <Modal title={initial ? '编辑面辅料' : '新增面辅料'} subtitle="可关联多个商品，并分别填写使用部位" onClose={onClose}><form onSubmit={submit} className="space-y-4 p-4"><div className="grid grid-cols-2 gap-2">{[['fabric', '面料'], ['accessory', '辅料']].map(([value, label]) => <button key={value} type="button" onClick={() => changeKind(value)} className={`rounded-xl border px-3 py-2.5 text-sm font-medium ${form.kind === value ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-gray-200 text-gray-500'}`}>{label}</button>)}</div><Field label="名称 *"><input className="input" value={form.name} onChange={e => set('name', e.target.value)} placeholder={form.kind === 'fabric' ? '例如：真丝提花面料' : '例如：盘扣'} /></Field><div className="grid grid-cols-2 gap-3"><Field label="型号"><input className="input" value={form.model} onChange={e => set('model', e.target.value)} /></Field><Field label="色号"><input className="input" value={form.color_code} onChange={e => set('color_code', e.target.value)} /></Field></div><Field label="联系微信"><input className="input" value={form.contact_wechat} onChange={e => set('contact_wechat', e.target.value)} placeholder="供应商微信" /></Field><div className="grid grid-cols-2 gap-3"><Field label="库存单位"><select className="input" value={form.unit} disabled={form.kind === 'fabric'} onChange={e => set('unit', e.target.value)}>{form.kind === 'fabric' ? <option>米</option> : <><option>个</option><option>件</option></>}</select></Field>{!initial ? <Field label="初始库存"><input type="number" min="0" step="0.01" className="input" value={form.initial_stock} onChange={e => set('initial_stock', e.target.value)} /></Field> : <Field label="当前库存"><div className="input bg-gray-50 text-gray-500">{formatQuantity(initial.current_stock)} {initial.unit}</div></Field>}</div><Field label="最低库存预警"><input type="number" min="0" step="0.01" className="input" value={form.min_stock} onChange={e => set('min_stock', e.target.value)} /></Field><label className="flex items-center justify-between rounded-xl bg-gray-50 px-3 py-3"><span><span className="block text-sm font-medium text-gray-700">关闭库存预警</span><span className="text-xs text-gray-400">开启后该项库存不足时不再提醒</span></span><input type="checkbox" checked={form.alert_disabled} onChange={e => set('alert_disabled', e.target.checked)} /></label><div><div className="mb-2 flex items-center justify-between"><label className="text-sm font-medium text-gray-700">关联商品与使用部位</label><button type="button" onClick={addLink} className="text-xs font-medium text-primary-600">+ 添加关联</button></div><div className="space-y-2">{form.links.map((link, index) => <div key={index} className="grid grid-cols-[1fr_1fr_auto] gap-2"><ProductSearchSelect products={products} value={link.product_id} autoFocus={!link.product_id && index === form.links.length - 1} onChange={value => updateLink(index, 'product_id', value)} /><input className="input" value={link.part} onChange={e => updateLink(index, 'part', e.target.value)} placeholder="关联部位，如袖口" /><button type="button" onClick={() => set('links', form.links.filter((_, i) => i !== index))} className="rounded-lg px-2 text-gray-400 hover:bg-red-50 hover:text-red-500"><X className="h-4 w-4" /></button></div>)}</div></div><Field label="备注"><textarea className="input min-h-20" value={form.note} onChange={e => set('note', e.target.value)} maxLength={500} /></Field>{error && <p className="text-sm text-red-600">{error}</p>}<button type="submit" disabled={saving} className="btn-primary w-full">{saving ? '保存中…' : '保存面辅料'}</button></form></Modal>;
 }
 
 function PurchaseModal({ item, onClose, onSaved }) {
@@ -124,6 +121,60 @@ function HistoryPanel({ item, onClose }) {
   useEffect(() => { load(); }, [load]); useSyncRefresh(load, ['material_purchases', 'material_consumptions']);
   const list = [...records.purchases.map(record => ({ ...record, type: 'purchase', date: record.purchase_date })), ...records.consumptions.map(record => ({ ...record, type: 'consume', date: record.consumed_at }))].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
   return <Modal title="库存记录" subtitle={`${item.name} · 当前 ${formatQuantity(item.current_stock)} ${item.unit}`} onClose={onClose}>{loading ? <div className="p-12 text-center text-sm text-gray-400">加载中…</div> : list.length ? <div className="divide-y divide-gray-100">{list.map(record => <div key={`${record.type}_${record.id}`} className="flex gap-3 px-4 py-3"><span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${record.type === 'purchase' ? 'bg-green-50 text-green-600' : 'bg-orange-50 text-orange-600'}`}>{record.type === 'purchase' ? <CircleDollarSign className="h-4 w-4" /> : <Factory className="h-4 w-4" />}</span><div className="min-w-0 flex-1"><div className="flex items-center justify-between"><p className="text-sm font-medium text-gray-800">{record.type === 'purchase' ? '购买入库' : '工厂裁数消耗'}</p><span className={`font-semibold ${record.type === 'purchase' ? 'text-green-600' : 'text-orange-600'}`}>{record.type === 'purchase' ? '+' : '−'}{formatQuantity(record.quantity)} {item.unit}</span></div><p className="mt-1 text-xs text-gray-400">{record.date}{record.type === 'purchase' ? ` · 花费 ¥${formatQuantity(record.amount)}` : `${record.product?.name ? ` · ${record.product.name}` : ''}${record.cut_quantity ? ` · 裁数 ${record.cut_quantity} 件` : ''}`}{record.user_name ? ` · ${record.user_name}` : ''}</p>{record.note && <p className="mt-1.5 rounded-lg bg-gray-50 px-2.5 py-1.5 text-xs text-gray-500">{record.note}</p>}</div></div>)}</div> : <div className="p-12 text-center text-sm text-gray-400">暂无购买或消耗记录</div>}</Modal>;
+}
+
+function ProductSearchSelect({ products, value, onChange, autoFocus = false }) {
+  const rootRef = useRef(null);
+  const inputRef = useRef(null);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const selected = products.find(product => String(product.id) === String(value));
+  const keyword = query.trim().toLocaleLowerCase('zh-CN');
+  const results = products.filter(product => !keyword || [
+    product.name, product.category, product.sub_tags,
+    ...(product.variants || []).flatMap(variant => [variant.size, variant.barcode]),
+  ].some(item => String(item || '').toLocaleLowerCase('zh-CN').includes(keyword))).slice(0, 50);
+
+  useEffect(() => {
+    if (!autoFocus || value) return;
+    inputRef.current?.focus();
+    setOpen(true);
+  }, [autoFocus, value]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = event => { if (!rootRef.current?.contains(event.target)) setOpen(false); };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+
+  const choose = product => {
+    onChange(String(product.id));
+    setQuery('');
+    setOpen(false);
+  };
+
+  return <div ref={rootRef} className="relative min-w-0">
+    <Search className="pointer-events-none absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-gray-400" />
+    <input
+      ref={inputRef}
+      type="search"
+      className="input pr-8 pl-9"
+      value={open ? query : (selected?.name || '')}
+      placeholder="搜索并选择商品"
+      onFocus={() => { setQuery(''); setOpen(true); }}
+      onChange={event => { setQuery(event.target.value); setOpen(true); }}
+      aria-expanded={open}
+      aria-label="搜索关联商品"
+    />
+    <ChevronDown className={`pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+    {open && <div className="absolute z-40 mt-1 max-h-56 w-full min-w-60 overflow-y-auto rounded-xl border border-gray-200 bg-white p-1 shadow-xl">
+      {results.length ? results.map(product => <button key={product.id} type="button" onClick={() => choose(product)} className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-gray-50 ${String(product.id) === String(value) ? 'bg-primary-50 text-primary-700' : 'text-gray-700'}`}>
+        <span className="min-w-0 flex-1"><span className="block truncate font-medium">{product.name}</span><span className="block truncate text-[11px] text-gray-400">{product.category || '未分类'}{product.sub_tags ? ` · ${product.sub_tags}` : ''}</span></span>
+        {String(product.id) === String(value) && <Check className="h-4 w-4 shrink-0" />}
+      </button>) : <p className="px-3 py-6 text-center text-sm text-gray-400">未找到匹配商品</p>}
+    </div>}
+  </div>;
 }
 
 function Field({ label, children }) { return <label className="block"><span className="mb-1.5 block text-sm font-medium text-gray-700">{label}</span>{children}</label>; }
