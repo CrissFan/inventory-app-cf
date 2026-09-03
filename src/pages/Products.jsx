@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { Plus, Search, ScanLine, Package, Pencil, Trash2, History, ArrowUpDown, ChevronDown, ChevronLeft, ChevronRight, X, Barcode, Clock, FileSpreadsheet, ListChecks } from 'lucide-react';
-import { getProducts, deleteProduct, batchDeleteProducts, getTags } from '../api/client';
+import { Plus, Search, ScanLine, Package, Pencil, Trash2, History, ArrowUpDown, ChevronDown, ChevronLeft, ChevronRight, X, Barcode, Clock, FileSpreadsheet, Layers3, ListChecks } from 'lucide-react';
+import { getProducts, deleteProduct, batchDeleteProducts, getTags, getMaterials } from '../api/client';
 import ProductForm from '../components/ProductForm';
 import BarcodeScanner from '../components/BarcodeScanner';
 import ProductChangesViewer from '../components/ProductChangesViewer';
@@ -484,6 +484,17 @@ export default function Products() {
 }
 
 export function ProductDetailPanel({ product, onClose }) {
+  const [relatedMaterials, setRelatedMaterials] = useState([]);
+  const loadRelatedMaterials = useCallback(async () => {
+    try {
+      const response = await getMaterials();
+      setRelatedMaterials((response.data || []).filter(material =>
+        (material.links || []).some(link => String(link.product_id) === String(product.id))));
+    } catch { setRelatedMaterials([]); }
+  }, [product.id]);
+  useEffect(() => { loadRelatedMaterials(); }, [loadRelatedMaterials]);
+  useSyncRefresh(loadRelatedMaterials, ['inventory_materials', 'inventory_material_product_links', 'material_purchases', 'material_consumptions']);
+
   const formatDate = (value) => value
     ? new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value))
     : '—';
@@ -538,6 +549,19 @@ export function ProductDetailPanel({ product, onClose }) {
                 </div>
               ))}
             </div>
+          </div>
+
+          <div className="mt-5">
+            <h4 className="mb-2 text-sm font-medium text-gray-700">关联面辅料</h4>
+            {relatedMaterials.length ? <div className="space-y-2">{relatedMaterials.map(material => {
+              const links = (material.links || []).filter(link => String(link.product_id) === String(product.id));
+              const low = !material.alert_disabled && Number(material.current_stock) < Number(material.min_stock);
+              return <div key={material.id} className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 ${low ? 'border-red-200 bg-red-50' : 'border-gray-200'}`}>
+                <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${material.kind === 'fabric' ? 'bg-purple-50 text-purple-600' : 'bg-green-50 text-green-600'}`}><Layers3 className="h-4 w-4" /></span>
+                <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-1.5"><p className="text-sm font-medium text-gray-800">{material.name}</p><span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-500">{material.kind === 'fabric' ? '面料' : '辅料'}</span>{low && <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-medium text-red-600">低库存</span>}</div><p className="mt-0.5 text-xs text-gray-400">型号 {material.model || '—'} · 色号 {material.color_code || '—'}{links.some(link => link.part) ? ` · 部位 ${links.map(link => link.part).filter(Boolean).join('、')}` : ''}</p></div>
+                <div className="shrink-0 text-right"><p className={`text-sm font-semibold ${low ? 'text-red-600' : 'text-gray-800'}`}>{material.current_stock} {material.unit}</p><p className="text-[10px] text-gray-400">{material.contact_wechat ? `微信 ${material.contact_wechat}` : '未填联系微信'}</p></div>
+              </div>;
+            })}</div> : <div className="rounded-xl bg-gray-50 px-3 py-5 text-center text-sm text-gray-400">暂未关联面料或辅料</div>}
           </div>
 
           {product.description && (

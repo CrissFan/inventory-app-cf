@@ -932,7 +932,7 @@ export const setFactoryInventory = async (productId, variants) => {
   return { data: normalizeFactoryItem({ ...data.factory, product: data.product }) };
 };
 
-export const addFactoryInventory = async (productId, variants, note = '') => {
+export const addFactoryInventory = async (productId, variants, note = '', materialConsumptions = []) => {
   assertCanWrite();
   const clean = (variants || []).map(variant => ({
     id: variant.id,
@@ -940,22 +940,30 @@ export const addFactoryInventory = async (productId, variants, note = '') => {
   }));
   if (!clean.some(variant => variant.quantity > 0)) throw new Error('请至少填写一个尺码的本次新增数量');
   const cleanNote = String(note || '').trim().slice(0, 500);
-  if (!USE_CLOUD) return api.put(`/factory-inventory/${productId}`, { variants: clean, mode: 'add', note: cleanNote });
+  const cleanConsumptions = (materialConsumptions || []).map(item => ({
+    material_id: Number(item.material_id), quantity: Number(item.quantity),
+  })).filter(item => item.material_id && item.quantity > 0);
+  if (!USE_CLOUD) return api.put(`/factory-inventory/${productId}`, { variants: clean, mode: 'add', note: cleanNote, material_consumptions: cleanConsumptions });
   if (navigator.onLine === false) throw new Error('待出货库存录入需要连接云端，请联网后重试');
   blockBackgroundSync();
-  const { data, error } = await supabase.rpc('add_factory_inventory', {
+  const { data, error } = await supabase.rpc('add_factory_inventory_with_materials', {
     p_product_id: Number(productId),
     p_variant_ids: clean.map(variant => variant.id),
     p_quantities: clean.map(variant => variant.quantity),
     p_note: cleanNote,
+    p_material_consumptions: cleanConsumptions,
   });
   if (error) {
-    if (/add_factory_inventory|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库增量录入接口尚未部署，请重新执行 factory-inventory-migration.sql');
+    if (/add_factory_inventory_with_materials|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库面辅料联动接口尚未部署，请重新执行 materials-inventory-migration.sql');
     throw new Error(error.message || '新增待出货库存失败');
   }
   if (data?.factory) await localDb.upsertFactoryInventory(data.factory);
   if (data?.change) await localDb.upsertProductChange(data.change);
-  emitSyncData(['factory_inventory', 'product_changes']);
+  for (const result of data?.material_results || []) {
+    if (result.material) await localDb.upsertMaterial(normalizeMaterial(result.material));
+    if (result.record) await localDb.upsertMaterialConsumption(result.record);
+  }
+  emitSyncData(['factory_inventory', 'product_changes', 'inventory_materials', 'material_consumptions']);
   return { data: normalizeFactoryItem({ ...data.factory, product: data.product }) };
 };
 

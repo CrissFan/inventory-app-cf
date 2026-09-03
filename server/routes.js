@@ -433,7 +433,9 @@ router.put('/factory-inventory/:productId', authMiddleware, (req, res) => {
   }
   const accumulate = req.body?.mode === 'add';
   const note = accumulate ? String(req.body?.note || '').trim().slice(0, 500) : '';
+  const materialConsumptions = accumulate && Array.isArray(req.body?.material_consumptions) ? req.body.material_consumptions : [];
   if (accumulate && ![...quantityMap.values()].some(quantity => quantity > 0)) return res.status(400).json({ error: '请至少填写一个尺码的本次新增数量' });
+  if (materialConsumptions.length > 100) return res.status(400).json({ error: '单次最多录入100项面辅料消耗' });
   const existingFactory = db.prepare('SELECT * FROM factory_inventory WHERE product_id = ? AND team_id = ?').get(productId, req.user.team_id);
   let existingVariants = [];
   try { existingVariants = JSON.parse(existingFactory?.variants || '[]'); } catch {}
@@ -448,6 +450,24 @@ router.put('/factory-inventory/:productId', authMiddleware, (req, res) => {
     .join('、');
   try {
     const save = db.transaction(() => {
+      const seenMaterialIds = new Set();
+      const cutQuantity = [...quantityMap.values()].reduce((sum, quantity) => sum + quantity, 0);
+      for (const input of materialConsumptions) {
+        const materialId = Number(input.material_id);
+        const quantity = Number(input.quantity);
+        if (!materialId || !(quantity > 0)) throw new Error('面辅料消耗信息不完整');
+        if (seenMaterialIds.has(materialId)) throw new Error('面辅料消耗项不能重复');
+        seenMaterialIds.add(materialId);
+        const material = db.prepare('SELECT * FROM inventory_materials WHERE id=? AND team_id=?').get(materialId, req.user.team_id);
+        if (!material) throw new Error('面辅料不存在');
+        const linked = db.prepare('SELECT id FROM inventory_material_product_links WHERE team_id=? AND material_id=? AND product_id=?').get(req.user.team_id, materialId, productId);
+        if (!linked) throw new Error(`「${material.name}」尚未关联该商品`);
+        if (material.kind === 'accessory' && !Number.isInteger(quantity)) throw new Error(`「${material.name}」的辅料消耗数量必须是整数`);
+        if (Number(material.current_stock) < quantity) throw new Error(`「${material.name}」库存不足，当前仅 ${material.current_stock} ${material.unit}`);
+        db.prepare("UPDATE inventory_materials SET current_stock=current_stock-?, updated_by=?, updated_at=datetime('now','localtime') WHERE id=?").run(quantity, req.user.id, materialId);
+        db.prepare('INSERT INTO material_consumptions(team_id,material_id,product_id,user_id,user_name,cut_quantity,quantity,consumed_at,note) VALUES (?,?,?,?,?,?,?,?,?)')
+          .run(req.user.team_id, materialId, productId, req.user.id, req.user.display_name || '', cutQuantity, quantity, new Date().toISOString().slice(0, 10), `待出货录入${note ? `：${note}` : ''}`.slice(0, 500));
+      }
       db.prepare(`
         INSERT INTO factory_inventory(team_id, product_id, status, variants) VALUES (?, ?, 'doing', ?)
         ON CONFLICT(team_id, product_id) DO UPDATE SET variants = excluded.variants, updated_at = datetime('now', 'localtime')

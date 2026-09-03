@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowDownToLine, Boxes, Calculator, CheckCircle2, ClipboardList, Download, Factory, LoaderCircle, Package, Pencil, Plus, Search, X } from 'lucide-react';
-import { addFactoryInventory, getFactoryInventory, getFactoryInventoryHistory, getProducts, setFactoryInventory, transferFactoryInventory } from '../api/client';
+import { AlertTriangle, ArrowDownToLine, Boxes, Calculator, CheckCircle2, ClipboardList, Download, Factory, Layers3, LoaderCircle, Package, Pencil, Plus, Search, X } from 'lucide-react';
+import { addFactoryInventory, getFactoryInventory, getFactoryInventoryHistory, getMaterials, getProducts, setFactoryInventory, transferFactoryInventory } from '../api/client';
 import { useAuth } from '../AuthContext';
 import ProductTagBadges from '../components/ProductTagBadges';
 import useSyncRefresh from '../lib/useSyncRefresh';
@@ -10,6 +10,7 @@ export default function FactoryInventory() {
   const canManage = user?.role !== 'viewer';
   const [items, setItems] = useState([]);
   const [products, setProducts] = useState([]);
+  const [materials, setMaterials] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [editorItem, setEditorItem] = useState(null);
@@ -21,9 +22,10 @@ export default function FactoryInventory() {
 
   const loadData = useCallback(async () => {
     try {
-      const [factoryResponse, productsResponse] = await Promise.all([getFactoryInventory(), getProducts()]);
+      const [factoryResponse, productsResponse, materialsResponse] = await Promise.all([getFactoryInventory(), getProducts(), getMaterials()]);
       setItems(Array.isArray(factoryResponse.data) ? factoryResponse.data : []);
       setProducts((Array.isArray(productsResponse.data) ? productsResponse.data : []).filter(product => (product.status || 'done') === 'done'));
+      setMaterials(Array.isArray(materialsResponse.data) ? materialsResponse.data : []);
     } catch (error) {
       setMessage({ type: 'error', text: error.response?.data?.error || error.message || '待出货库存加载失败' });
     } finally {
@@ -32,7 +34,7 @@ export default function FactoryInventory() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
-  useSyncRefresh(loadData, ['products', 'factory_inventory']);
+  useSyncRefresh(loadData, ['products', 'factory_inventory', 'inventory_materials', 'inventory_material_product_links', 'material_consumptions']);
 
   const activeItems = useMemo(() => items.filter(item => item.total_quantity > 0), [items]);
   const filteredItems = useMemo(() => {
@@ -71,7 +73,7 @@ export default function FactoryInventory() {
         : filteredItems.length === 0 ? <div className="card p-12 text-center text-sm text-gray-400"><Factory className="mx-auto mb-3 h-11 w-11 text-gray-300" /><p>{search ? '未找到匹配的待出货商品' : '暂无待出货商品'}</p>{canManage && !search && <button type="button" onClick={() => openEditor(null)} className="btn-primary mx-auto mt-4"><Plus className="h-4 w-4" />录入第一件商品</button>}</div>
         : <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">{filteredItems.map(item => <FactoryCard key={item.id} item={item} canManage={canManage} onEdit={() => openEditor(item)} onTransfer={() => setTransferItem(item)} />)}</div>}
 
-      {showEditor && <FactoryInventoryEditor products={products} items={items} initialItem={editorItem} onClose={() => { setShowEditor(false); setEditorItem(null); }} onSaved={handleSaved} />}
+      {showEditor && <FactoryInventoryEditor products={products} materials={materials} items={items} initialItem={editorItem} onClose={() => { setShowEditor(false); setEditorItem(null); }} onSaved={handleSaved} />}
       {showHistory && <FactoryInventoryHistory onClose={() => setShowHistory(false)} />}
       {showCalculator && <ReplenishmentCalculator products={products} items={items} operator={user?.display_name || user?.username || '未记录'} onClose={() => setShowCalculator(false)} />}
       {transferItem && <FactoryTransferModal item={transferItem} operator={user?.display_name || ''} onClose={() => setTransferItem(null)} onTransferred={handleTransferred} />}
@@ -375,28 +377,38 @@ function FactoryCard({ item, canManage, onEdit, onTransfer }) {
   </article>;
 }
 
-function FactoryInventoryEditor({ products, items, initialItem, onClose, onSaved }) {
+function FactoryInventoryEditor({ products, materials, initialItem, onClose, onSaved }) {
   const [selectedProduct, setSelectedProduct] = useState(initialItem?.product || null);
   const [search, setSearch] = useState('');
   const [quantities, setQuantities] = useState(() => Object.fromEntries((initialItem?.variants || []).map(variant => [variant.id, variant.quantity])));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
+  const [materialQuantities, setMaterialQuantities] = useState({});
   const candidates = products.filter(product => !search.trim() || [product.name, product.category, product.sub_tags, ...(product.variants || []).flatMap(variant => [variant.size, variant.barcode])].some(value => String(value || '').toLocaleLowerCase('zh-CN').includes(search.trim().toLocaleLowerCase('zh-CN'))));
 
   const chooseProduct = product => {
     setSelectedProduct(product);
     setQuantities(Object.fromEntries((product.variants || []).map(variant => [variant.id, 0])));
+    setMaterialQuantities({});
     setError('');
   };
+  const linkedMaterials = useMemo(() => selectedProduct ? materials.filter(material =>
+    (material.links || []).some(link => String(link.product_id) === String(selectedProduct.id))) : [], [materials, selectedProduct]);
   const submit = async event => {
     event.preventDefault();
     if (!selectedProduct) { setError('请选择商品'); return; }
     setSaving(true); setError('');
     try {
       const variants = (selectedProduct.variants || []).map(variant => ({ id: variant.id, quantity: Math.max(0, Number.parseInt(quantities[variant.id], 10) || 0) }));
+      const materialConsumptions = linkedMaterials.map(material => ({ material_id: material.id, quantity: Number(materialQuantities[material.id]) || 0 })).filter(item => item.quantity > 0);
+      for (const consumption of materialConsumptions) {
+        const material = linkedMaterials.find(item => String(item.id) === String(consumption.material_id));
+        if (material?.kind === 'accessory' && !Number.isInteger(consumption.quantity)) throw new Error(`「${material.name}」的辅料消耗数量请填写整数`);
+        if (consumption.quantity > Number(material?.current_stock || 0)) throw new Error(`「${material.name}」库存不足，当前仅 ${material.current_stock} ${material.unit}`);
+      }
       if (initialItem) await setFactoryInventory(selectedProduct.id, variants);
-      else await addFactoryInventory(selectedProduct.id, variants, note);
+      else await addFactoryInventory(selectedProduct.id, variants, note, materialConsumptions);
       await onSaved(initialItem
         ? `已调整「${selectedProduct.name}」的待出货数量`
         : `本次录入已合并到「${selectedProduct.name}」的待出货库存`);
@@ -409,7 +421,22 @@ function FactoryInventoryEditor({ products, items, initialItem, onClose, onSaved
     <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col"><main className="flex-1 overflow-y-auto p-4"><div className="mx-auto max-w-2xl space-y-4 pb-6">
       {error && <div className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-600">{error}</div>}
       {!selectedProduct ? <><div className="relative"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" /><input className="input pl-9" placeholder="搜索要录入的销售商品" value={search} onChange={event => setSearch(event.target.value)} autoFocus /></div><div className="card divide-y divide-gray-100">{candidates.map(product => <button key={product.id} type="button" onClick={() => chooseProduct(product)} className="flex w-full items-center gap-3 p-3 text-left hover:bg-gray-50"><span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-gray-100">{product.image_path ? <img src={product.image_path} alt="" className="h-full w-full object-cover" /> : <Package className="h-5 w-5 text-gray-300" />}</span><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-gray-800">{product.name}</span><span className="text-xs text-gray-400">{product.variants?.length || 0} 个尺码 · 销售中 done</span></span></button>)}</div></>
-      : <><div className="card flex items-center gap-3 p-4"><span className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-gray-100">{selectedProduct.image_path ? <img src={selectedProduct.image_path} alt="" className="h-full w-full object-cover" /> : <Package className="h-5 w-5 text-gray-300" />}</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-gray-900">{selectedProduct.name}</p><ProductTagBadges product={selectedProduct} max={3} className="mt-1" /></div>{!initialItem && <button type="button" onClick={() => setSelectedProduct(null)} className="text-xs text-primary-600">更换</button>}</div><section className="card overflow-hidden"><div className="border-b border-gray-100 px-4 py-3"><h3 className="text-sm font-medium text-gray-800">{initialItem ? '各尺码当前汇总数量' : '各尺码本次新增数量'}</h3><p className="mt-0.5 text-xs text-gray-400">{initialItem ? '修改后将直接保存为新的汇总数量' : '可重复录入同一商品，系统会按尺码累加'}</p></div><div className="divide-y divide-gray-100">{(selectedProduct.variants || []).map(variant => <div key={variant.id} className="flex items-center gap-3 px-4 py-3"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{variant.size}</p><p className="truncate font-mono text-xs text-gray-400">{variant.barcode}</p></div><input type="number" min="0" step="1" value={quantities[variant.id] ?? 0} onChange={event => setQuantities(current => ({ ...current, [variant.id]: event.target.value }))} className="input h-10 w-28 text-center font-semibold" aria-label={`${variant.size}${initialItem ? '汇总' : '新增'}待出货数量`} /></div>)}</div></section>{!initialItem && <section className="card p-4"><label className="block text-sm font-medium text-gray-800">本次录入备注 <span className="font-normal text-gray-400">（可选）</span></label><textarea value={note} onChange={event => setNote(event.target.value.slice(0, 500))} rows={3} className="input mt-2 resize-none py-2.5" placeholder="例如：9月第一批大货、预计周五发出" /><p className="mt-1 text-right text-xs text-gray-400">{note.length}/500</p></section>}</>}
+      : <><div className="card flex items-center gap-3 p-4"><span className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-gray-100">{selectedProduct.image_path ? <img src={selectedProduct.image_path} alt="" className="h-full w-full object-cover" /> : <Package className="h-5 w-5 text-gray-300" />}</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-gray-900">{selectedProduct.name}</p><ProductTagBadges product={selectedProduct} max={3} className="mt-1" /></div>{!initialItem && <button type="button" onClick={() => setSelectedProduct(null)} className="text-xs text-primary-600">更换</button>}</div><section className="card overflow-hidden"><div className="border-b border-gray-100 px-4 py-3"><h3 className="text-sm font-medium text-gray-800">{initialItem ? '各尺码当前汇总数量' : '各尺码本次新增数量'}</h3><p className="mt-0.5 text-xs text-gray-400">{initialItem ? '修改后将直接保存为新的汇总数量' : '可重复录入同一商品，系统会按尺码累加'}</p></div><div className="divide-y divide-gray-100">{(selectedProduct.variants || []).map(variant => <div key={variant.id} className="flex items-center gap-3 px-4 py-3"><div className="min-w-0 flex-1"><p className="text-sm font-medium text-gray-700">{variant.size}</p><p className="truncate font-mono text-xs text-gray-400">{variant.barcode}</p></div><input type="number" min="0" step="1" value={quantities[variant.id] ?? 0} onChange={event => setQuantities(current => ({ ...current, [variant.id]: event.target.value }))} className="input h-10 w-28 text-center font-semibold" aria-label={`${variant.size}${initialItem ? '汇总' : '新增'}待出货数量`} /></div>)}</div></section>{!initialItem && <section className="card overflow-hidden border-orange-200">
+        <div className="flex gap-3 border-b border-orange-100 bg-orange-50 px-4 py-3 text-orange-800">
+          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+          <div><h3 className="text-sm font-semibold">同步填写本次面辅料消耗</h3><p className="mt-0.5 text-xs leading-5">系统已按商品自动匹配关联项，请重点核对实际消耗；保存后库存会立即扣减并触发预警。</p></div>
+        </div>
+        {linkedMaterials.length ? <div className="divide-y divide-gray-100">{linkedMaterials.map(material => {
+          const parts = (material.links || []).filter(link => String(link.product_id) === String(selectedProduct.id)).map(link => link.part).filter(Boolean);
+          const entered = Number(materialQuantities[material.id]) || 0;
+          const insufficient = entered > Number(material.current_stock || 0);
+          return <div key={material.id} className="flex items-center gap-3 px-4 py-3">
+            <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${material.kind === 'fabric' ? 'bg-purple-50 text-purple-600' : 'bg-green-50 text-green-600'}`}><Layers3 className="h-4 w-4" /></span>
+            <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-gray-800">{material.name}</p><p className={`mt-0.5 text-xs ${insufficient ? 'font-medium text-red-600' : 'text-gray-400'}`}>{parts.length ? `部位：${parts.join('、')} · ` : ''}库存 {material.current_stock} {material.unit}</p></div>
+            <input type="number" min="0" max={material.current_stock} step={material.kind === 'fabric' ? '0.01' : '1'} value={materialQuantities[material.id] ?? ''} onChange={event => setMaterialQuantities(current => ({ ...current, [material.id]: event.target.value }))} className={`input h-10 w-28 text-center font-semibold ${insufficient ? 'border-red-400 bg-red-50 text-red-700' : 'border-orange-200'}`} placeholder={`消耗${material.unit}`} aria-label={`${material.name}消耗数量`} />
+          </div>;
+        })}</div> : <div className="px-4 py-6 text-center text-sm text-gray-400">该商品尚未关联面料或辅料，可先到“面辅料管理”中绑定</div>}
+      </section>}{!initialItem && <section className="card p-4"><label className="block text-sm font-medium text-gray-800">本次录入备注 <span className="font-normal text-gray-400">（可选）</span></label><textarea value={note} onChange={event => setNote(event.target.value.slice(0, 500))} rows={3} className="input mt-2 resize-none py-2.5" placeholder="例如：9月第一批大货、预计周五发出" /><p className="mt-1 text-right text-xs text-gray-400">{note.length}/500</p></section>}</>}
     </div></main><footer className="shrink-0 border-t border-gray-200 bg-white px-4 py-3" style={{ paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}><div className="mx-auto flex max-w-2xl gap-3"><button type="button" onClick={onClose} className="btn-secondary flex-1">取消</button><button type="submit" disabled={!selectedProduct || saving} className="btn-primary flex-1">{saving ? <><LoaderCircle className="h-4 w-4 animate-spin" />保存中</> : initialItem ? '保存调整' : '合并本次录入'}</button></div></footer></form>
   </div>;
 }

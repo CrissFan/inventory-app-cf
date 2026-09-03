@@ -230,6 +230,61 @@ GRANT EXECUTE ON FUNCTION save_inventory_material(BIGINT, TEXT, TEXT, TEXT, TEXT
 GRANT EXECUTE ON FUNCTION record_material_purchase(BIGINT, NUMERIC, NUMERIC, DATE, TEXT, TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION record_material_consumption(BIGINT, BIGINT, INTEGER, NUMERIC, DATE, TEXT, TEXT) TO authenticated;
 
+-- 录入待出货订单时，在同一事务内增加 doing 库存并扣减已关联的面辅料。
+CREATE OR REPLACE FUNCTION add_factory_inventory_with_materials(
+  p_product_id BIGINT,
+  p_variant_ids TEXT[],
+  p_quantities INTEGER[],
+  p_note TEXT DEFAULT '',
+  p_material_consumptions JSONB DEFAULT '[]'::JSONB
+)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_team_id UUID;
+  v_role TEXT;
+  v_item JSONB;
+  v_quantity NUMERIC;
+  v_material_id BIGINT;
+  v_cut_quantity INTEGER;
+  v_factory_result JSONB;
+  v_material_result JSONB;
+  v_material_results JSONB := '[]'::JSONB;
+BEGIN
+  SELECT team_id, role INTO v_team_id, v_role FROM team_members WHERE user_id = auth.uid() LIMIT 1;
+  IF v_team_id IS NULL OR v_role NOT IN ('admin', 'member') THEN RAISE EXCEPTION '无待出货库存录入权限'; END IF;
+  IF p_material_consumptions IS NULL OR jsonb_typeof(p_material_consumptions) <> 'array' THEN RAISE EXCEPTION '面辅料消耗格式无效'; END IF;
+  IF jsonb_array_length(p_material_consumptions) > 100 THEN RAISE EXCEPTION '单次最多录入100项面辅料消耗'; END IF;
+  IF EXISTS (
+    SELECT 1 FROM jsonb_array_elements(p_material_consumptions) item
+    GROUP BY item->>'material_id' HAVING COUNT(*) > 1
+  ) THEN RAISE EXCEPTION '面辅料消耗项不能重复'; END IF;
+
+  v_cut_quantity := COALESCE((SELECT SUM(input.quantity) FROM unnest(p_quantities) AS input(quantity)), 0);
+  v_factory_result := add_factory_inventory(p_product_id, p_variant_ids, p_quantities, p_note);
+
+  FOR v_item IN SELECT value FROM jsonb_array_elements(p_material_consumptions) ORDER BY (value->>'material_id')::BIGINT LOOP
+    v_material_id := (v_item->>'material_id')::BIGINT;
+    v_quantity := (v_item->>'quantity')::NUMERIC;
+    IF v_quantity <= 0 THEN RAISE EXCEPTION '面辅料消耗数量必须大于0'; END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM inventory_material_product_links
+      WHERE team_id = v_team_id AND material_id = v_material_id AND product_id = p_product_id
+    ) THEN RAISE EXCEPTION '面辅料 % 尚未关联该商品', v_material_id; END IF;
+    v_material_result := record_material_consumption(
+      v_material_id, p_product_id, v_cut_quantity, v_quantity, CURRENT_DATE,
+      LEFT('待出货录入' || CASE WHEN BTRIM(COALESCE(p_note, '')) = '' THEN '' ELSE '：' || BTRIM(p_note) END, 500),
+      NULL
+    );
+    v_material_results := v_material_results || jsonb_build_array(v_material_result);
+  END LOOP;
+
+  RETURN v_factory_result || jsonb_build_object('material_results', v_material_results);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION add_factory_inventory_with_materials(BIGINT, TEXT[], INTEGER[], TEXT, JSONB) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION add_factory_inventory_with_materials(BIGINT, TEXT[], INTEGER[], TEXT, JSONB) TO authenticated;
+
 ALTER TABLE inventory_materials REPLICA IDENTITY FULL;
 ALTER TABLE inventory_material_product_links REPLICA IDENTITY FULL;
 ALTER TABLE material_purchases REPLICA IDENTITY FULL;
