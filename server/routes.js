@@ -812,4 +812,109 @@ router.get('/activity', authMiddleware, (req, res) => {
   res.json({ data: records.slice(offset, offset + pageSize), total, page: requestedPage, pageSize });
 });
 
+// ============ Materials inventory ============
+
+const materialRow = row => row ? ({ ...row, current_stock: Number(row.current_stock) || 0, min_stock: Number(row.min_stock) || 0, alert_disabled: Boolean(row.alert_disabled) }) : row;
+
+router.get('/materials', authMiddleware, (req, res) => {
+  const materials = db.prepare('SELECT * FROM inventory_materials WHERE team_id = ? ORDER BY updated_at DESC').all(req.user.team_id).map(materialRow);
+  const links = db.prepare(`SELECT l.*, p.name AS product_name, p.image_path AS product_image FROM inventory_material_product_links l LEFT JOIN products p ON p.id = l.product_id WHERE l.team_id = ?`).all(req.user.team_id);
+  res.json(materials.map(material => ({ ...material, links: links.filter(link => link.material_id === material.id).map(link => ({ ...link, product: link.product_id ? { id: link.product_id, name: link.product_name, image_path: link.product_image } : null })) })));
+});
+
+router.post('/materials/save', authMiddleware, (req, res) => {
+  if (!['admin', 'member'].includes(req.user.role)) return res.status(403).json({ error: '当前账号没有面辅料编辑权限' });
+  const input = req.body || {};
+  const kind = String(input.kind || '');
+  const unit = String(input.unit || '');
+  const name = String(input.name || '').trim();
+  const minStock = Number(input.min_stock) || 0;
+  const initialStock = Number(input.initial_stock) || 0;
+  const links = Array.isArray(input.links) ? input.links : [];
+  if (!name) return res.status(400).json({ error: '名称不能为空' });
+  if (!['fabric', 'accessory'].includes(kind)) return res.status(400).json({ error: '面辅料类型无效' });
+  if ((kind === 'fabric' && unit !== '米') || (kind === 'accessory' && !['个', '件'].includes(unit))) return res.status(400).json({ error: '单位与类型不匹配' });
+  if (minStock < 0) return res.status(400).json({ error: '最低库存不能为负数' });
+  if (initialStock < 0) return res.status(400).json({ error: '初始库存不能为负数' });
+  if (kind === 'accessory' && (!Number.isInteger(minStock) || !Number.isInteger(initialStock))) return res.status(400).json({ error: '辅料库存只能填写整数' });
+  try {
+    const save = db.transaction(() => {
+      let materialId = Number(input.id) || null;
+      const values = [kind, name, String(input.contact_wechat || '').trim(), String(input.model || '').trim(), String(input.color_code || '').trim(), unit, minStock, input.alert_disabled ? 1 : 0, String(input.note || '').trim().slice(0, 500), req.user.id];
+      if (materialId) {
+        const info = db.prepare("UPDATE inventory_materials SET kind=?, name=?, contact_wechat=?, model=?, color_code=?, unit=?, min_stock=?, alert_disabled=?, note=?, updated_by=?, updated_at=datetime('now','localtime') WHERE id=? AND team_id=?").run(...values, materialId, req.user.team_id);
+        if (!info.changes) throw new Error('面辅料不存在');
+      } else {
+        const info = db.prepare('INSERT INTO inventory_materials(kind,name,contact_wechat,model,color_code,unit,current_stock,min_stock,alert_disabled,note,created_by,updated_by,team_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run(kind, name, String(input.contact_wechat || '').trim(), String(input.model || '').trim(), String(input.color_code || '').trim(), unit, initialStock, minStock, input.alert_disabled ? 1 : 0, String(input.note || '').trim().slice(0, 500), req.user.id, req.user.id, req.user.team_id);
+        materialId = Number(info.lastInsertRowid);
+      }
+      db.prepare('DELETE FROM inventory_material_product_links WHERE material_id=? AND team_id=?').run(materialId, req.user.team_id);
+      for (const link of links) {
+        const productId = Number(link.product_id);
+        if (!db.prepare('SELECT id FROM products WHERE id=? AND team_id=?').get(productId, req.user.team_id)) throw new Error('关联商品不存在');
+        db.prepare('INSERT OR IGNORE INTO inventory_material_product_links(team_id,material_id,product_id,part) VALUES (?,?,?,?)').run(req.user.team_id, materialId, productId, String(link.part || '').trim().slice(0, 100));
+      }
+      return {
+        material: materialRow(db.prepare('SELECT * FROM inventory_materials WHERE id=?').get(materialId)),
+        links: db.prepare('SELECT * FROM inventory_material_product_links WHERE material_id=?').all(materialId),
+      };
+    });
+    res.json(save());
+  } catch (error) { res.status(400).json({ error: error.message || '保存面辅料失败' }); }
+});
+
+router.post('/materials/:id/purchases', authMiddleware, (req, res) => {
+  if (!['admin', 'member'].includes(req.user.role)) return res.status(403).json({ error: '当前账号没有购买记录录入权限' });
+  const quantity = Number(req.body.quantity); const amount = Number(req.body.amount) || 0;
+  if (!(quantity > 0) || amount < 0) return res.status(400).json({ error: '购买数量必须大于0，花费不能为负数' });
+  try {
+    const save = db.transaction(() => {
+      const operationId = String(req.body.client_operation_id || '').trim();
+      if (operationId) {
+        const previous = db.prepare('SELECT * FROM material_purchases WHERE team_id=? AND client_operation_id=?').get(req.user.team_id, operationId);
+        if (previous) return { material: materialRow(db.prepare('SELECT * FROM inventory_materials WHERE id=?').get(previous.material_id)), record: previous, duplicate: true };
+      }
+      const material = db.prepare('SELECT * FROM inventory_materials WHERE id=? AND team_id=?').get(req.params.id, req.user.team_id);
+      if (!material) throw new Error('面辅料不存在');
+      if (material.kind === 'accessory' && !Number.isInteger(quantity)) throw new Error('辅料购买数量只能填写整数');
+      db.prepare("UPDATE inventory_materials SET current_stock=current_stock+?, updated_by=?, updated_at=datetime('now','localtime') WHERE id=?").run(quantity, req.user.id, material.id);
+      const info = db.prepare('INSERT INTO material_purchases(team_id,material_id,user_id,user_name,quantity,amount,purchase_date,note,client_operation_id) VALUES (?,?,?,?,?,?,?,?,?)').run(req.user.team_id, material.id, req.user.id, req.user.display_name || '', quantity, amount, req.body.purchase_date || new Date().toISOString().slice(0, 10), String(req.body.note || '').slice(0, 500), req.body.client_operation_id || null);
+      return { material: materialRow(db.prepare('SELECT * FROM inventory_materials WHERE id=?').get(material.id)), record: db.prepare('SELECT * FROM material_purchases WHERE id=?').get(info.lastInsertRowid), duplicate: false };
+    });
+    res.json(save());
+  } catch (error) { res.status(400).json({ error: error.message || '购买入库失败' }); }
+});
+
+router.post('/materials/:id/consumptions', authMiddleware, (req, res) => {
+  if (!['admin', 'member'].includes(req.user.role)) return res.status(403).json({ error: '当前账号没有裁数消耗录入权限' });
+  const quantity = Number(req.body.quantity); const cutQuantity = Number(req.body.cut_quantity) || 0; const productId = req.body.product_id ? Number(req.body.product_id) : null;
+  if (!(quantity > 0) || !Number.isInteger(cutQuantity) || cutQuantity < 0) return res.status(400).json({ error: '消耗数量必须大于0，工厂裁数不能为负数' });
+  try {
+    const save = db.transaction(() => {
+      const operationId = String(req.body.client_operation_id || '').trim();
+      if (operationId) {
+        const previous = db.prepare('SELECT * FROM material_consumptions WHERE team_id=? AND client_operation_id=?').get(req.user.team_id, operationId);
+        if (previous) return { material: materialRow(db.prepare('SELECT * FROM inventory_materials WHERE id=?').get(previous.material_id)), record: previous, duplicate: true };
+      }
+      const material = db.prepare('SELECT * FROM inventory_materials WHERE id=? AND team_id=?').get(req.params.id, req.user.team_id);
+      if (!material) throw new Error('面辅料不存在');
+      if (material.kind === 'accessory' && !Number.isInteger(quantity)) throw new Error('辅料消耗数量只能填写整数');
+      if (Number(material.current_stock) < quantity) throw new Error(`库存不足，当前库存 ${material.current_stock} ${material.unit}`);
+      if (productId && !db.prepare('SELECT id FROM products WHERE id=? AND team_id=?').get(productId, req.user.team_id)) throw new Error('关联商品不存在');
+      db.prepare("UPDATE inventory_materials SET current_stock=current_stock-?, updated_by=?, updated_at=datetime('now','localtime') WHERE id=?").run(quantity, req.user.id, material.id);
+      const info = db.prepare('INSERT INTO material_consumptions(team_id,material_id,product_id,user_id,user_name,cut_quantity,quantity,consumed_at,note,client_operation_id) VALUES (?,?,?,?,?,?,?,?,?,?)').run(req.user.team_id, material.id, productId, req.user.id, req.user.display_name || '', cutQuantity, quantity, req.body.consumed_at || new Date().toISOString().slice(0, 10), String(req.body.note || '').slice(0, 500), req.body.client_operation_id || null);
+      return { material: materialRow(db.prepare('SELECT * FROM inventory_materials WHERE id=?').get(material.id)), record: db.prepare('SELECT * FROM material_consumptions WHERE id=?').get(info.lastInsertRowid), duplicate: false };
+    });
+    res.json(save());
+  } catch (error) { res.status(400).json({ error: error.message || '裁数消耗失败' }); }
+});
+
+router.get('/materials/:id/records', authMiddleware, (req, res) => {
+  const material = db.prepare('SELECT id FROM inventory_materials WHERE id=? AND team_id=?').get(req.params.id, req.user.team_id);
+  if (!material) return res.status(404).json({ error: '面辅料不存在' });
+  const purchases = db.prepare('SELECT * FROM material_purchases WHERE material_id=? AND team_id=? ORDER BY created_at DESC').all(material.id, req.user.team_id);
+  const consumptions = db.prepare('SELECT c.*, p.name AS product_name FROM material_consumptions c LEFT JOIN products p ON p.id=c.product_id WHERE c.material_id=? AND c.team_id=? ORDER BY c.created_at DESC').all(material.id, req.user.team_id).map(record => ({ ...record, product: record.product_id ? { id: record.product_id, name: record.product_name } : null }));
+  res.json({ purchases, consumptions });
+});
+
 export default router;

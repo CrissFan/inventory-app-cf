@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { LayoutDashboard, Package, ArrowDownToLine, ArrowUpFromLine, History, Users, Tag, LogOut, ChevronDown, Crown, Cloud, CloudOff, Wifi, WifiOff, ChartNoAxesCombined, MoreHorizontal, X, Factory } from 'lucide-react';
+import { LayoutDashboard, Package, ArrowDownToLine, ArrowUpFromLine, History, Users, Tag, LogOut, ChevronDown, Crown, Cloud, CloudOff, Wifi, WifiOff, ChartNoAxesCombined, MoreHorizontal, X, Factory, Layers3 } from 'lucide-react';
 import { useAuth } from '../AuthContext';
 import { getSyncStatus, isSupabaseAvailable } from '../api/client';
 
@@ -7,6 +7,7 @@ const navItems = [
   { id: 'dashboard', label: '库存预览', icon: LayoutDashboard },
   { id: 'products', label: '商品管理', icon: Package },
   { id: 'factory', label: '工厂待出货', icon: Factory },
+  { id: 'materials', label: '面辅料管理', icon: Layers3 },
   { id: 'tags', label: '标签管理', icon: Tag },
   { id: 'stock-in', label: '入库', icon: ArrowDownToLine },
   { id: 'stock-out', label: '出库', icon: ArrowUpFromLine },

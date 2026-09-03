@@ -1247,6 +1247,126 @@ export const deleteTag = async (id) => {
   return writeWithSync('tags', 'delete', { id });
 };
 
+// =============== 面辅料库存 API ===============
+
+const normalizeMaterial = material => ({
+  ...material,
+  current_stock: Number(material.current_stock) || 0,
+  min_stock: Number(material.min_stock) || 0,
+  alert_disabled: toBoolean(material.alert_disabled),
+});
+
+export const getMaterials = async () => {
+  if (!USE_CLOUD) return api.get('/materials');
+  const [materials, links, products] = await Promise.all([
+    localDb.getAllMaterials(), localDb.getAllMaterialLinks(), localDb.getAllProducts(),
+  ]);
+  const productMap = new Map(products.map(product => [String(product.id), product]));
+  requestBackgroundSync();
+  return { data: materials.map(normalizeMaterial).map(material => ({
+    ...material,
+    links: links.filter(link => String(link.material_id) === String(material.id)).map(link => ({
+      ...link,
+      product: productMap.get(String(link.product_id)) || null,
+    })),
+  })).sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0)) };
+};
+
+export const saveMaterial = async data => {
+  assertCanWrite();
+  if (!USE_CLOUD) return api.post('/materials/save', data);
+  if (navigator.onLine === false) throw new Error('面辅料编辑需要连接云端，请联网后重试');
+  blockBackgroundSync();
+  const { data: result, error } = await supabase.rpc('save_inventory_material', {
+    p_id: data.id || null,
+    p_kind: data.kind,
+    p_name: data.name,
+    p_contact_wechat: data.contact_wechat || '',
+    p_model: data.model || '',
+    p_color_code: data.color_code || '',
+    p_unit: data.unit,
+    p_initial_stock: Number(data.initial_stock) || 0,
+    p_min_stock: Number(data.min_stock) || 0,
+    p_alert_disabled: Boolean(data.alert_disabled),
+    p_note: data.note || '',
+    p_links: (data.links || []).map(link => ({ product_id: Number(link.product_id), part: link.part || '' })),
+  });
+  if (error) {
+    if (/save_inventory_material|schema cache|PGRST202|inventory_materials/i.test(error.message || '')) throw new Error('数据库面辅料功能尚未部署，请先执行 materials-inventory-migration.sql');
+    throw new Error(error.message || '保存面辅料失败');
+  }
+  const material = normalizeMaterial(result.material);
+  const allLinks = await localDb.getAllMaterialLinks();
+  await Promise.all([
+    localDb.upsertMaterial(material),
+    localDb.replaceMaterialLinks([
+      ...allLinks.filter(link => String(link.material_id) !== String(material.id)),
+      ...(result.links || []),
+    ]),
+  ]);
+  emitSyncData(['inventory_materials', 'inventory_material_product_links']);
+  return { data: { material, links: result.links || [] } };
+};
+
+export const recordMaterialPurchase = async data => {
+  assertCanWrite();
+  if (!USE_CLOUD) return api.post(`/materials/${data.material_id}/purchases`, data);
+  if (navigator.onLine === false) throw new Error('购买记录需要连接云端，请联网后重试');
+  blockBackgroundSync();
+  const clientOperationId = data.client_operation_id || operationId('material_purchase');
+  markLocalRealtimeEcho('material_purchases', 'client_operation_id', clientOperationId);
+  const { data: result, error } = await supabase.rpc('record_material_purchase', {
+    p_material_id: Number(data.material_id), p_quantity: Number(data.quantity),
+    p_amount: Number(data.amount) || 0, p_purchase_date: data.purchase_date,
+    p_note: data.note || '', p_client_operation_id: clientOperationId,
+  });
+  if (error) {
+    if (/record_material_purchase|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库面辅料功能尚未部署，请先执行 materials-inventory-migration.sql');
+    throw new Error(error.message || '购买入库失败');
+  }
+  await localDb.upsertMaterial(normalizeMaterial(result.material));
+  if (result.record) await localDb.upsertMaterialPurchase(result.record);
+  emitSyncData(['inventory_materials', 'material_purchases']);
+  return { data: result };
+};
+
+export const recordMaterialConsumption = async data => {
+  assertCanWrite();
+  if (!USE_CLOUD) return api.post(`/materials/${data.material_id}/consumptions`, data);
+  if (navigator.onLine === false) throw new Error('裁数消耗需要连接云端，请联网后重试');
+  blockBackgroundSync();
+  const clientOperationId = data.client_operation_id || operationId('material_consumption');
+  markLocalRealtimeEcho('material_consumptions', 'client_operation_id', clientOperationId);
+  const { data: result, error } = await supabase.rpc('record_material_consumption', {
+    p_material_id: Number(data.material_id),
+    p_product_id: data.product_id ? Number(data.product_id) : null,
+    p_cut_quantity: Number(data.cut_quantity) || 0,
+    p_quantity: Number(data.quantity), p_consumed_at: data.consumed_at,
+    p_note: data.note || '', p_client_operation_id: clientOperationId,
+  });
+  if (error) {
+    if (/record_material_consumption|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库面辅料功能尚未部署，请先执行 materials-inventory-migration.sql');
+    throw new Error(error.message || '裁数消耗失败');
+  }
+  await localDb.upsertMaterial(normalizeMaterial(result.material));
+  if (result.record) await localDb.upsertMaterialConsumption(result.record);
+  emitSyncData(['inventory_materials', 'material_consumptions']);
+  return { data: result };
+};
+
+export const getMaterialRecords = async materialId => {
+  if (!USE_CLOUD) return api.get(`/materials/${materialId}/records`);
+  const [purchases, consumptions, products] = await Promise.all([
+    localDb.getAllMaterialPurchases(), localDb.getAllMaterialConsumptions(), localDb.getAllProducts(),
+  ]);
+  const productMap = new Map(products.map(product => [String(product.id), product]));
+  requestBackgroundSync();
+  return { data: {
+    purchases: purchases.filter(record => String(record.material_id) === String(materialId)).map(record => ({ ...record, quantity: Number(record.quantity), amount: Number(record.amount) })),
+    consumptions: consumptions.filter(record => String(record.material_id) === String(materialId)).map(record => ({ ...record, quantity: Number(record.quantity), product: productMap.get(String(record.product_id)) || null })),
+  } };
+};
+
 export const getSyncDiagnostics = async () => ({
   status: getSyncStatus(),
   pending: await localDb.getSyncQueue(),

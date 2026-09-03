@@ -175,18 +175,26 @@ export async function pullFromCloud() {
   const teamId = await getTeamId();
   if (!teamId) throw new Error('缺少团队信息，无法同步');
 
-  const [productsRes, movementsRes, tagsRes, changesRes, factoryRes] = await Promise.all([
+  const [productsRes, movementsRes, tagsRes, changesRes, factoryRes, materialsRes, materialLinksRes, purchasesRes, consumptionsRes] = await Promise.all([
     supabase.from('products').select('*').eq('team_id', teamId).order('updated_at', { ascending: false }),
     supabase.from('stock_movements').select('*').eq('team_id', teamId).order('created_at', { ascending: false }).limit(1000),
     supabase.from('tags').select('*').eq('team_id', teamId).order('created_at', { ascending: true }),
     supabase.from('product_changes').select('*').eq('team_id', teamId).order('created_at', { ascending: false }).limit(1000),
     supabase.from('factory_inventory').select('*').eq('team_id', teamId).order('updated_at', { ascending: false }),
+    supabase.from('inventory_materials').select('*').eq('team_id', teamId).order('updated_at', { ascending: false }),
+    supabase.from('inventory_material_product_links').select('*').eq('team_id', teamId),
+    supabase.from('material_purchases').select('*').eq('team_id', teamId).order('created_at', { ascending: false }).limit(1000),
+    supabase.from('material_consumptions').select('*').eq('team_id', teamId).order('created_at', { ascending: false }).limit(1000),
   ]);
   const products = assertResult(productsRes, '拉取商品失败').map(normalizeProduct);
   const movements = assertResult(movementsRes, '拉取流水失败');
   const tags = assertResult(tagsRes, '拉取标签失败');
   const changes = assertResult(changesRes, '拉取变更记录失败');
   const factoryInventory = assertResult(factoryRes, '拉取工厂待出货库存失败');
+  const materials = assertResult(materialsRes, '拉取面辅料失败');
+  const materialLinks = assertResult(materialLinksRes, '拉取面辅料商品关联失败');
+  const materialPurchases = assertResult(purchasesRes, '拉取面辅料购买记录失败');
+  const materialConsumptions = assertResult(consumptionsRes, '拉取裁数消耗记录失败');
 
   // replace 而不是 upsert，确保其他设备删除的数据也会从本地消失。
   await Promise.all([
@@ -195,12 +203,16 @@ export async function pullFromCloud() {
     localDb.replaceTags(tags),
     localDb.replaceProductChanges(changes),
     localDb.replaceFactoryInventory(factoryInventory),
+    localDb.replaceMaterials(materials),
+    localDb.replaceMaterialLinks(materialLinks),
+    localDb.replaceMaterialPurchases(materialPurchases),
+    localDb.replaceMaterialConsumptions(materialConsumptions),
   ]);
   state.lastSync = new Date().toISOString();
   state.lastError = null;
   await localDb.setMeta('last_sync', state.lastSync);
   emitStatus();
-  emitData(['products', 'stock_movements', 'tags', 'product_changes', 'factory_inventory'], 'full-sync');
+  emitData(['products', 'stock_movements', 'tags', 'product_changes', 'factory_inventory', 'inventory_materials', 'inventory_material_product_links', 'material_purchases', 'material_consumptions'], 'full-sync');
   return true;
 }
 
@@ -504,6 +516,18 @@ async function applyRealtimeEvent(table, payload) {
   } else if (table === 'factory_inventory') {
     if (isDelete) await localDb.deleteFactoryInventory(row.id);
     else await localDb.upsertFactoryInventory(row);
+  } else if (table === 'inventory_materials') {
+    if (isDelete) await localDb.deleteMaterial(row.id);
+    else await localDb.upsertMaterial(row);
+  } else if (table === 'inventory_material_product_links') {
+    if (isDelete) await localDb.deleteMaterialLink(row.id);
+    else await localDb.upsertMaterialLink(row);
+  } else if (table === 'material_purchases') {
+    if (isDelete) await localDb.deleteMaterialPurchase(row.id);
+    else await localDb.upsertMaterialPurchase(row);
+  } else if (table === 'material_consumptions') {
+    if (isDelete) await localDb.deleteMaterialConsumption(row.id);
+    else await localDb.upsertMaterialConsumption(row);
   }
   return consumeLocalRealtimeEcho(table, row);
 }
@@ -528,7 +552,7 @@ function subscribeRealtime(teamId) {
   const supabase = getSupabase();
   if (realtimeChannel) supabase.removeChannel(realtimeChannel);
   realtimeChannel = supabase.channel(`inventory:${teamId}`);
-  for (const table of ['products', 'tags', 'stock_movements', 'product_changes', 'factory_inventory']) {
+  for (const table of ['products', 'tags', 'stock_movements', 'product_changes', 'factory_inventory', 'inventory_materials', 'inventory_material_product_links', 'material_purchases', 'material_consumptions']) {
     realtimeChannel.on('postgres_changes', {
       event: '*', schema: 'public', table, filter: `team_id=eq.${teamId}`,
     }, payload => {

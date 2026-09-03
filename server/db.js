@@ -159,4 +159,78 @@ db.exec(`
 `);
 try { db.exec("ALTER TABLE product_changes ADD COLUMN note TEXT DEFAULT ''"); } catch {}
 
+// 面辅料库存、商品关联、购买记录和工厂裁数消耗。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS inventory_materials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('fabric', 'accessory')),
+    name TEXT NOT NULL,
+    contact_wechat TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    color_code TEXT NOT NULL DEFAULT '',
+    unit TEXT NOT NULL CHECK(unit IN ('米', '个', '件')),
+    current_stock REAL NOT NULL DEFAULT 0 CHECK(current_stock >= 0),
+    min_stock REAL NOT NULL DEFAULT 0 CHECK(min_stock >= 0),
+    alert_disabled INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT '',
+    created_by INTEGER,
+    updated_by INTEGER,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_inventory_materials_team ON inventory_materials(team_id);
+
+  CREATE TABLE IF NOT EXISTS inventory_material_product_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL,
+    material_id INTEGER NOT NULL,
+    product_id INTEGER NOT NULL,
+    part TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
+    FOREIGN KEY (material_id) REFERENCES inventory_materials(id) ON DELETE CASCADE,
+    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+    UNIQUE(material_id, product_id, part)
+  );
+  CREATE INDEX IF NOT EXISTS idx_material_links_team ON inventory_material_product_links(team_id);
+
+  CREATE TABLE IF NOT EXISTS material_purchases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL,
+    material_id INTEGER NOT NULL,
+    user_id INTEGER,
+    user_name TEXT NOT NULL DEFAULT '',
+    quantity REAL NOT NULL CHECK(quantity > 0),
+    amount REAL NOT NULL DEFAULT 0 CHECK(amount >= 0),
+    purchase_date TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    client_operation_id TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
+    FOREIGN KEY (material_id) REFERENCES inventory_materials(id) ON DELETE CASCADE,
+    UNIQUE(team_id, client_operation_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS material_consumptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL,
+    material_id INTEGER NOT NULL,
+    product_id INTEGER,
+    user_id INTEGER,
+    user_name TEXT NOT NULL DEFAULT '',
+    cut_quantity INTEGER NOT NULL DEFAULT 0 CHECK(cut_quantity >= 0),
+    quantity REAL NOT NULL CHECK(quantity > 0),
+    consumed_at TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    client_operation_id TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
+    FOREIGN KEY (material_id) REFERENCES inventory_materials(id) ON DELETE CASCADE,
+    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL,
+    UNIQUE(team_id, client_operation_id)
+  );
+`);
+
 export default db;

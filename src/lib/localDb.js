@@ -6,7 +6,7 @@
 import { openDB } from 'idb';
 
 const DB_NAME = 'inventory_local';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 let dbPromise = null;
 
@@ -64,6 +64,14 @@ function getDb() {
           factoryStore.createIndex('product_id', 'product_id', { unique: false });
           factoryStore.createIndex('team_id', 'team_id', { unique: false });
           factoryStore.createIndex('updated_at', 'updated_at', { unique: false });
+        }
+
+        for (const storeName of ['inventory_materials', 'inventory_material_product_links', 'material_purchases', 'material_consumptions']) {
+          if (!db.objectStoreNames.contains(storeName)) {
+            const store = db.createObjectStore(storeName, { keyPath: 'id' });
+            store.createIndex('team_id', 'team_id', { unique: false });
+            if (storeName !== 'inventory_materials') store.createIndex('material_id', 'material_id', { unique: false });
+          }
         }
       },
     });
@@ -276,6 +284,49 @@ export async function replaceFactoryInventory(items) {
   await tx.done;
 }
 
+// =============== 面辅料库存 ===============
+
+async function getAllFromStore(storeName) {
+  const db = await getDb();
+  return db.getAll(storeName);
+}
+
+async function upsertStoreRecord(storeName, record) {
+  if (!record?.id) return;
+  const db = await getDb();
+  await db.put(storeName, record);
+}
+
+async function deleteStoreRecord(storeName, id) {
+  const db = await getDb();
+  await db.delete(storeName, id);
+}
+
+async function replaceStoreRecords(storeName, records) {
+  const db = await getDb();
+  const tx = db.transaction(storeName, 'readwrite');
+  await tx.store.clear();
+  for (const record of records) await tx.store.put(record);
+  await tx.done;
+}
+
+export const getAllMaterials = () => getAllFromStore('inventory_materials');
+export const upsertMaterial = record => upsertStoreRecord('inventory_materials', record);
+export const deleteMaterial = id => deleteStoreRecord('inventory_materials', id);
+export const replaceMaterials = records => replaceStoreRecords('inventory_materials', records);
+export const getAllMaterialLinks = () => getAllFromStore('inventory_material_product_links');
+export const upsertMaterialLink = record => upsertStoreRecord('inventory_material_product_links', record);
+export const deleteMaterialLink = id => deleteStoreRecord('inventory_material_product_links', id);
+export const replaceMaterialLinks = records => replaceStoreRecords('inventory_material_product_links', records);
+export const getAllMaterialPurchases = () => getAllFromStore('material_purchases');
+export const upsertMaterialPurchase = record => upsertStoreRecord('material_purchases', record);
+export const deleteMaterialPurchase = id => deleteStoreRecord('material_purchases', id);
+export const replaceMaterialPurchases = records => replaceStoreRecords('material_purchases', records);
+export const getAllMaterialConsumptions = () => getAllFromStore('material_consumptions');
+export const upsertMaterialConsumption = record => upsertStoreRecord('material_consumptions', record);
+export const deleteMaterialConsumption = id => deleteStoreRecord('material_consumptions', id);
+export const replaceMaterialConsumptions = records => replaceStoreRecords('material_consumptions', records);
+
 // =============== 标签 ===============
 
 export async function getAllTags() {
@@ -369,15 +420,19 @@ export async function activateCacheScope(userId, teamId) {
 
 export async function getLocalSnapshot() {
   const db = await getDb();
-  const [products, movements, tags, productChanges, factoryInventory, syncQueue] = await Promise.all([
+  const [products, movements, tags, productChanges, factoryInventory, materials, materialLinks, materialPurchases, materialConsumptions, syncQueue] = await Promise.all([
     db.getAll('products'),
     db.getAll('stock_movements'),
     db.getAll('tags'),
     db.getAll('product_changes'),
     db.getAll('factory_inventory'),
+    db.getAll('inventory_materials'),
+    db.getAll('inventory_material_product_links'),
+    db.getAll('material_purchases'),
+    db.getAll('material_consumptions'),
     db.getAll('sync_queue'),
   ]);
-  return { products, movements, tags, productChanges, factoryInventory, syncQueue };
+  return { products, movements, tags, productChanges, factoryInventory, materials, materialLinks, materialPurchases, materialConsumptions, syncQueue };
 }
 
 // =============== 批量清空 ===============
@@ -389,5 +444,9 @@ export async function clearAll() {
   await db.clear('tags');
   await db.clear('product_changes');
   await db.clear('factory_inventory');
+  await db.clear('inventory_materials');
+  await db.clear('inventory_material_product_links');
+  await db.clear('material_purchases');
+  await db.clear('material_consumptions');
   await db.clear('sync_queue');
 }
