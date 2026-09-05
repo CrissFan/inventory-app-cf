@@ -175,7 +175,7 @@ export async function pullFromCloud() {
   const teamId = await getTeamId();
   if (!teamId) throw new Error('缺少团队信息，无法同步');
 
-  const [productsRes, movementsRes, tagsRes, changesRes, factoryRes, materialsRes, materialLinksRes, purchasesRes, consumptionsRes] = await Promise.all([
+  const [productsRes, movementsRes, tagsRes, changesRes, factoryRes, materialsRes, materialLinksRes, purchasesRes, consumptionsRes, plansRes] = await Promise.all([
     supabase.from('products').select('*').eq('team_id', teamId).order('updated_at', { ascending: false }),
     supabase.from('stock_movements').select('*').eq('team_id', teamId).order('created_at', { ascending: false }).limit(1000),
     supabase.from('tags').select('*').eq('team_id', teamId).order('created_at', { ascending: true }),
@@ -185,6 +185,7 @@ export async function pullFromCloud() {
     supabase.from('inventory_material_product_links').select('*').eq('team_id', teamId),
     supabase.from('material_purchases').select('*').eq('team_id', teamId).order('created_at', { ascending: false }).limit(1000),
     supabase.from('material_consumptions').select('*').eq('team_id', teamId).order('created_at', { ascending: false }).limit(1000),
+    supabase.from('new_product_plans').select('*').eq('team_id', teamId).order('updated_at', { ascending: false }),
   ]);
   const products = assertResult(productsRes, '拉取商品失败').map(normalizeProduct);
   const movements = assertResult(movementsRes, '拉取流水失败');
@@ -195,6 +196,7 @@ export async function pullFromCloud() {
   const materialLinks = assertResult(materialLinksRes, '拉取面辅料商品关联失败');
   const materialPurchases = assertResult(purchasesRes, '拉取面辅料购买记录失败');
   const materialConsumptions = assertResult(consumptionsRes, '拉取裁数消耗记录失败');
+  const newProductPlans = assertResult(plansRes, '拉取新品计划失败');
 
   // replace 而不是 upsert，确保其他设备删除的数据也会从本地消失。
   await Promise.all([
@@ -207,12 +209,13 @@ export async function pullFromCloud() {
     localDb.replaceMaterialLinks(materialLinks),
     localDb.replaceMaterialPurchases(materialPurchases),
     localDb.replaceMaterialConsumptions(materialConsumptions),
+    localDb.replaceNewProductPlans(newProductPlans),
   ]);
   state.lastSync = new Date().toISOString();
   state.lastError = null;
   await localDb.setMeta('last_sync', state.lastSync);
   emitStatus();
-  emitData(['products', 'stock_movements', 'tags', 'product_changes', 'factory_inventory', 'inventory_materials', 'inventory_material_product_links', 'material_purchases', 'material_consumptions'], 'full-sync');
+  emitData(['products', 'stock_movements', 'tags', 'product_changes', 'factory_inventory', 'inventory_materials', 'inventory_material_product_links', 'material_purchases', 'material_consumptions', 'new_product_plans'], 'full-sync');
   return true;
 }
 
@@ -528,6 +531,9 @@ async function applyRealtimeEvent(table, payload) {
   } else if (table === 'material_consumptions') {
     if (isDelete) await localDb.deleteMaterialConsumption(row.id);
     else await localDb.upsertMaterialConsumption(row);
+  } else if (table === 'new_product_plans') {
+    if (isDelete) await localDb.deleteNewProductPlan(row.id);
+    else await localDb.upsertNewProductPlan(row);
   }
   return consumeLocalRealtimeEcho(table, row);
 }
@@ -552,7 +558,7 @@ function subscribeRealtime(teamId) {
   const supabase = getSupabase();
   if (realtimeChannel) supabase.removeChannel(realtimeChannel);
   realtimeChannel = supabase.channel(`inventory:${teamId}`);
-  for (const table of ['products', 'tags', 'stock_movements', 'product_changes', 'factory_inventory', 'inventory_materials', 'inventory_material_product_links', 'material_purchases', 'material_consumptions']) {
+  for (const table of ['products', 'tags', 'stock_movements', 'product_changes', 'factory_inventory', 'inventory_materials', 'inventory_material_product_links', 'material_purchases', 'material_consumptions', 'new_product_plans']) {
     realtimeChannel.on('postgres_changes', {
       event: '*', schema: 'public', table, filter: `team_id=eq.${teamId}`,
     }, payload => {

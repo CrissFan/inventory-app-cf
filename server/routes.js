@@ -937,4 +937,76 @@ router.get('/materials/:id/records', authMiddleware, (req, res) => {
   res.json({ purchases, consumptions });
 });
 
+// ============ New product plans ============
+
+const newProductPlanRow = row => {
+  if (!row) return row;
+  let materials = []; let stageTimestamps = {};
+  try { materials = JSON.parse(row.materials || '[]'); } catch {}
+  try { stageTimestamps = JSON.parse(row.stage_timestamps || '{}'); } catch {}
+  return { ...row, materials, stage_timestamps: stageTimestamps };
+};
+
+router.get('/new-product-plans', authMiddleware, (req, res) => {
+  const rows = db.prepare('SELECT * FROM new_product_plans WHERE team_id=? ORDER BY updated_at DESC').all(req.user.team_id);
+  res.json(rows.map(newProductPlanRow));
+});
+
+router.post('/new-product-plans/save', authMiddleware, (req, res) => {
+  if (!['admin', 'member'].includes(req.user.role)) return res.status(403).json({ error: '当前账号没有新品计划编辑权限' });
+  const input = req.body || {};
+  const name = String(input.name || '').trim();
+  const materialIds = [...new Set((Array.isArray(input.material_ids) ? input.material_ids : []).map(Number).filter(Boolean))];
+  if (!name) return res.status(400).json({ error: '商品名称不能为空' });
+  try {
+    const save = db.transaction(() => {
+      const materials = materialIds.map(id => {
+        const material = db.prepare("SELECT id,name,model,color_code,unit FROM inventory_materials WHERE id=? AND team_id=? AND kind='fabric'").get(id, req.user.team_id);
+        if (!material) throw new Error('选择的面料不存在');
+        return material;
+      });
+      let assignee = null;
+      if (input.assignee_user_id) {
+        assignee = db.prepare("SELECT id,display_name FROM users WHERE id=? AND team_id=? AND role IN ('admin','member')").get(Number(input.assignee_user_id), req.user.team_id);
+        if (!assignee) throw new Error('负责人必须是当前团队的管理员或成员');
+      }
+      const values = [name, String(input.product_type || '').trim(), JSON.stringify(materials), String(input.design_image_url || ''), String(input.description || '').trim().slice(0, 2000), input.planned_launch_date || null, assignee?.id || null, assignee?.display_name || '', req.user.id];
+      let id = Number(input.id) || null;
+      if (id) {
+        const info = db.prepare("UPDATE new_product_plans SET name=?,product_type=?,materials=?,design_image_url=?,description=?,planned_launch_date=?,assignee_user_id=?,assignee_name=?,updated_by=?,updated_at=datetime('now','localtime') WHERE id=? AND team_id=?").run(...values, id, req.user.team_id);
+        if (!info.changes) throw new Error('新品计划不存在');
+      } else {
+        const now = new Date().toISOString();
+        const info = db.prepare('INSERT INTO new_product_plans(team_id,name,product_type,materials,design_image_url,description,planned_launch_date,stage,stage_timestamps,assignee_user_id,assignee_name,created_by,updated_by) VALUES (?,?,?,?,?,?,?,\'pattern\',?,?,?,?,?)')
+          .run(req.user.team_id, ...values.slice(0, 6), JSON.stringify({ pattern: now }), assignee?.id || null, assignee?.display_name || '', req.user.id, req.user.id);
+        id = Number(info.lastInsertRowid);
+      }
+      return newProductPlanRow(db.prepare('SELECT * FROM new_product_plans WHERE id=?').get(id));
+    });
+    res.json(save());
+  } catch (error) { res.status(400).json({ error: error.message || '保存新品计划失败' }); }
+});
+
+router.post('/new-product-plans/:id/advance', authMiddleware, (req, res) => {
+  if (!['admin', 'member'].includes(req.user.role)) return res.status(403).json({ error: '当前账号没有新品进度管理权限' });
+  const stages = ['pattern', 'sample', 'adjust', 'preview', 'listed'];
+  try {
+    const advance = db.transaction(() => {
+      const row = db.prepare('SELECT * FROM new_product_plans WHERE id=? AND team_id=?').get(req.params.id, req.user.team_id);
+      if (!row) throw new Error('新品计划不存在');
+      const currentIndex = stages.indexOf(row.stage);
+      const nextStage = String(req.body.next_stage || '');
+      if (currentIndex >= stages.length - 1) throw new Error('该商品已上架销售');
+      if (nextStage !== stages[currentIndex + 1]) throw new Error('新品阶段必须按顺序推进');
+      let timestamps = {};
+      try { timestamps = JSON.parse(row.stage_timestamps || '{}'); } catch {}
+      timestamps[nextStage] = new Date().toISOString();
+      db.prepare("UPDATE new_product_plans SET stage=?,stage_timestamps=?,updated_by=?,updated_at=datetime('now','localtime') WHERE id=?")
+        .run(nextStage, JSON.stringify(timestamps), req.user.id, row.id);
+      return newProductPlanRow(db.prepare('SELECT * FROM new_product_plans WHERE id=?').get(row.id));
+    });
+    res.json(advance());
+  } catch (error) { res.status(400).json({ error: error.message || '推进新品阶段失败' }); }
+});
+
 export default router;

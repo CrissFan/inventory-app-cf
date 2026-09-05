@@ -12,6 +12,7 @@ import Tags from './pages/Tags';
 import Monitoring from './pages/Monitoring';
 import FactoryInventory from './pages/FactoryInventory';
 import Materials from './pages/Materials';
+import NewProductPlans from './pages/NewProductPlans';
 import Login from './pages/Login';
 
 function AppContent() {
@@ -57,6 +58,7 @@ function AppContent() {
         case 'monitoring': return <Monitoring />;
         case 'factory': return <FactoryInventory />;
         case 'materials': return <Materials />;
+        case 'new-products': return <NewProductPlans />;
         case 'team': return <Team />;
         default: return <Dashboard onNavigate={navigate} canManage={!isViewer} />;
       }

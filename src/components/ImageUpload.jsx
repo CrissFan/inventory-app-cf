@@ -62,7 +62,7 @@ export const compressProductImage = (file) => new Promise((resolve, reject) => {
   reader.readAsDataURL(file);
 });
 
-export default function ImageUpload({ value, onChange }) {
+export default function ImageUpload({ value, onChange, label = '商品图片' }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [showLibrary, setShowLibrary] = useState(false);
@@ -115,7 +115,7 @@ export default function ImageUpload({ value, onChange }) {
   return (
     <div onClick={(event) => event.stopPropagation()}>
       <div className="mb-2 flex items-end justify-between gap-3">
-        <label className="block text-sm font-medium text-gray-700">商品图片</label>
+        <label className="block text-sm font-medium text-gray-700">{label}</label>
         <span className="text-[11px] text-gray-400">最长边 1440px · 最大 200KB</span>
       </div>
 

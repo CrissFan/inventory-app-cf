@@ -233,4 +233,30 @@ db.exec(`
   );
 `);
 
+// 新品计划：阶段进入时间保存在 stage_timestamps JSON 中。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS new_product_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    product_type TEXT NOT NULL DEFAULT '',
+    materials TEXT NOT NULL DEFAULT '[]',
+    design_image_url TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    planned_launch_date TEXT,
+    stage TEXT NOT NULL DEFAULT 'pattern' CHECK(stage IN ('pattern', 'sample', 'adjust', 'preview', 'listed')),
+    stage_timestamps TEXT NOT NULL DEFAULT '{}',
+    assignee_user_id INTEGER,
+    assignee_name TEXT NOT NULL DEFAULT '',
+    created_by INTEGER,
+    updated_by INTEGER,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
+    FOREIGN KEY (assignee_user_id) REFERENCES users(id) ON DELETE SET NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_new_product_plans_team ON new_product_plans(team_id);
+  CREATE INDEX IF NOT EXISTS idx_new_product_plans_stage ON new_product_plans(team_id, stage);
+`);
+
 export default db;

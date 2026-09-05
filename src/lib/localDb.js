@@ -6,7 +6,7 @@
 import { openDB } from 'idb';
 
 const DB_NAME = 'inventory_local';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 let dbPromise = null;
 
@@ -72,6 +72,13 @@ function getDb() {
             store.createIndex('team_id', 'team_id', { unique: false });
             if (storeName !== 'inventory_materials') store.createIndex('material_id', 'material_id', { unique: false });
           }
+        }
+
+        if (!db.objectStoreNames.contains('new_product_plans')) {
+          const plansStore = db.createObjectStore('new_product_plans', { keyPath: 'id' });
+          plansStore.createIndex('team_id', 'team_id', { unique: false });
+          plansStore.createIndex('stage', 'stage', { unique: false });
+          plansStore.createIndex('updated_at', 'updated_at', { unique: false });
         }
       },
     });
@@ -327,6 +334,11 @@ export const upsertMaterialConsumption = record => upsertStoreRecord('material_c
 export const deleteMaterialConsumption = id => deleteStoreRecord('material_consumptions', id);
 export const replaceMaterialConsumptions = records => replaceStoreRecords('material_consumptions', records);
 
+export const getAllNewProductPlans = () => getAllFromStore('new_product_plans');
+export const upsertNewProductPlan = record => upsertStoreRecord('new_product_plans', record);
+export const deleteNewProductPlan = id => deleteStoreRecord('new_product_plans', id);
+export const replaceNewProductPlans = records => replaceStoreRecords('new_product_plans', records);
+
 // =============== 标签 ===============
 
 export async function getAllTags() {
@@ -420,7 +432,7 @@ export async function activateCacheScope(userId, teamId) {
 
 export async function getLocalSnapshot() {
   const db = await getDb();
-  const [products, movements, tags, productChanges, factoryInventory, materials, materialLinks, materialPurchases, materialConsumptions, syncQueue] = await Promise.all([
+  const [products, movements, tags, productChanges, factoryInventory, materials, materialLinks, materialPurchases, materialConsumptions, newProductPlans, syncQueue] = await Promise.all([
     db.getAll('products'),
     db.getAll('stock_movements'),
     db.getAll('tags'),
@@ -430,9 +442,10 @@ export async function getLocalSnapshot() {
     db.getAll('inventory_material_product_links'),
     db.getAll('material_purchases'),
     db.getAll('material_consumptions'),
+    db.getAll('new_product_plans'),
     db.getAll('sync_queue'),
   ]);
-  return { products, movements, tags, productChanges, factoryInventory, materials, materialLinks, materialPurchases, materialConsumptions, syncQueue };
+  return { products, movements, tags, productChanges, factoryInventory, materials, materialLinks, materialPurchases, materialConsumptions, newProductPlans, syncQueue };
 }
 
 // =============== 批量清空 ===============
@@ -448,5 +461,6 @@ export async function clearAll() {
   await db.clear('inventory_material_product_links');
   await db.clear('material_purchases');
   await db.clear('material_consumptions');
+  await db.clear('new_product_plans');
   await db.clear('sync_queue');
 }

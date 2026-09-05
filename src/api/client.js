@@ -1375,6 +1375,64 @@ export const getMaterialRecords = async materialId => {
   } };
 };
 
+// =============== 新品计划 API ===============
+
+const normalizeNewProductPlan = plan => {
+  let materials = plan?.materials || [];
+  let stageTimestamps = plan?.stage_timestamps || {};
+  if (typeof materials === 'string') { try { materials = JSON.parse(materials); } catch { materials = []; } }
+  if (typeof stageTimestamps === 'string') { try { stageTimestamps = JSON.parse(stageTimestamps); } catch { stageTimestamps = {}; } }
+  return { ...plan, materials: Array.isArray(materials) ? materials : [], stage_timestamps: stageTimestamps || {} };
+};
+
+export const getNewProductPlans = async () => {
+  if (!USE_CLOUD) return api.get('/new-product-plans');
+  const plans = await localDb.getAllNewProductPlans();
+  requestBackgroundSync();
+  return { data: plans.map(normalizeNewProductPlan).sort((a, b) => new Date(b.updated_at || 0) - new Date(a.updated_at || 0)) };
+};
+
+export const saveNewProductPlan = async data => {
+  assertCanWrite();
+  if (!USE_CLOUD) return api.post('/new-product-plans/save', data);
+  if (navigator.onLine === false) throw new Error('新品计划编辑需要连接云端，请联网后重试');
+  blockBackgroundSync();
+  const { data: result, error } = await supabase.rpc('save_new_product_plan', {
+    p_id: data.id || null,
+    p_name: data.name,
+    p_product_type: data.product_type || '',
+    p_material_ids: (data.material_ids || []).map(Number),
+    p_design_image_url: data.design_image_url || '',
+    p_description: data.description || '',
+    p_planned_launch_date: data.planned_launch_date || null,
+    p_assignee_user_id: data.assignee_user_id || null,
+  });
+  if (error) {
+    if (/save_new_product_plan|new_product_plans|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库新品计划功能尚未部署，请先执行 new-product-plans-migration.sql');
+    throw new Error(error.message || '保存新品计划失败');
+  }
+  const plan = normalizeNewProductPlan(result);
+  await localDb.upsertNewProductPlan(plan);
+  emitSyncData(['new_product_plans']);
+  return { data: plan };
+};
+
+export const advanceNewProductPlan = async (id, nextStage) => {
+  assertCanWrite();
+  if (!USE_CLOUD) return api.post(`/new-product-plans/${id}/advance`, { next_stage: nextStage });
+  if (navigator.onLine === false) throw new Error('推进新品阶段需要连接云端');
+  blockBackgroundSync();
+  const { data: result, error } = await supabase.rpc('advance_new_product_plan', { p_id: Number(id), p_next_stage: nextStage });
+  if (error) {
+    if (/advance_new_product_plan|schema cache|PGRST202/i.test(error.message || '')) throw new Error('数据库新品进度接口尚未部署，请先执行 new-product-plans-migration.sql');
+    throw new Error(error.message || '推进新品阶段失败');
+  }
+  const plan = normalizeNewProductPlan(result);
+  await localDb.upsertNewProductPlan(plan);
+  emitSyncData(['new_product_plans']);
+  return { data: plan };
+};
+
 export const getSyncDiagnostics = async () => ({
   status: getSyncStatus(),
   pending: await localDb.getSyncQueue(),
